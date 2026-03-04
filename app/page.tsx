@@ -1,4 +1,5 @@
-// App.tsx — simplest PDF drop + preview (no size check, no fancy states)
+"use client"
+
 import React, { useEffect, useState } from "react";
 
 export default function App() {
