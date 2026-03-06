@@ -56,7 +56,7 @@ export default function App() {
         parserUrl: PARSER_URL,
         error: err,
       });
-      setError("Could not reach parser backend. Is it running on port 8000?");
+      setError("Could not reach parser backend. Run npm run dev:stack (or start backend on port 8000).");
     } finally {
       setIsParsing(false);
     }

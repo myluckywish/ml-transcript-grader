@@ -9,6 +9,14 @@ npm install
 npm run dev
 ```
 
+To run frontend + parser backend together:
+
+```bash
+npm run dev:stack
+```
+
+`dev:stack` expects backend dependencies to be installed in `backend/.venv`.
+
 By default, the frontend posts documents to `http://127.0.0.1:8000/parse`.
 Override this with:
 
