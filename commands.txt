@@ -1,0 +1,3 @@
+  uvicorn main:app --reload --port 8000 --log-level debug
+  Dont forget .venv, must be in backend. 
+  Linux: source .venv/bin/activate

@@ -44,6 +44,28 @@ Available endpoints:
 - `GET /health`
 - `POST /parse` (multipart form with `file`)
 
+`POST /parse` response shape:
+
+```json
+{
+  "filename": "example.json",
+  "mime_type": "application/json",
+  "extracted_text": "{\n  \"name\": \"demo\"\n}",
+  "characters": 22,
+  "parsed_content": {
+    "content_kind": "structured_json",
+    "json": { "name": "demo" },
+    "text": "{\n  \"name\": \"demo\"\n}",
+    "lines": ["{", "  \"name\": \"demo\"", "}"],
+    "paragraphs": ["{\n  \"name\": \"demo\"\n}"]
+  }
+}
+```
+
+`parsed_content.content_kind` is:
+- `structured_json` for valid JSON input (`parsed_content.json` populated)
+- `plain_text` for all other files (`parsed_content.json` is `null`)
+
 Backend structure (modular):
 - `backend/main.py`: entrypoint for `uvicorn main:app`
 - `backend/app/main.py`: API routes and request handling

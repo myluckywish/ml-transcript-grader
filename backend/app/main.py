@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +32,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/parse")
-async def parse_document(file: UploadFile = File(...)) -> dict[str, str | int]:
+async def parse_document(file: UploadFile = File(...)) -> dict[str, Any]:
     filename = file.filename or "unknown"
     suffix = Path(filename).suffix.lower()
     content_type = file.content_type or "application/octet-stream"
@@ -48,7 +49,8 @@ async def parse_document(file: UploadFile = File(...)) -> dict[str, str | int]:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
-        extracted_text = parse_document_bytes(data, suffix, content_type)
+        parse_result = parse_document_bytes(data, suffix, content_type)
+        extracted_text = parse_result["extracted_text"]
         logger.debug(
             "Parsed document filename=%s extracted_chars=%d",
             filename,
@@ -73,4 +75,5 @@ async def parse_document(file: UploadFile = File(...)) -> dict[str, str | int]:
         "mime_type": content_type,
         "extracted_text": extracted_text,
         "characters": len(extracted_text),
+        "parsed_content": parse_result["parsed_content"],
     }

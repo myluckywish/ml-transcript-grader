@@ -4,10 +4,19 @@ import React, { useEffect, useState } from "react";
 
 const PARSER_URL = process.env.NEXT_PUBLIC_PARSER_API_URL ?? "http://127.0.0.1:8000/parse";
 
+type ParseResponse = {
+  extracted_text?: string;
+  parsed_content?: {
+    json?: unknown | null;
+  };
+  detail?: string;
+};
+
 export default function App() {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [extractedText, setExtractedText] = useState("");
+  const [parsedJsonText, setParsedJsonText] = useState("null");
   const [isParsing, setIsParsing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,6 +32,7 @@ export default function App() {
     setSelectedName(file.name);
     setError(null);
     setExtractedText("");
+    setParsedJsonText("null");
 
     const nextPdfUrl = file.type === "application/pdf" ? URL.createObjectURL(file) : null;
     if (pdfUrl) URL.revokeObjectURL(pdfUrl);
@@ -37,7 +47,7 @@ export default function App() {
         method: "POST",
         body: payload,
       });
-      const data = await res.json();
+      const data: ParseResponse = await res.json();
       if (!res.ok) {
         console.error("Parse API error", {
           status: res.status,
@@ -50,6 +60,7 @@ export default function App() {
         return;
       }
       setExtractedText(data.extracted_text ?? "");
+      setParsedJsonText(JSON.stringify(data.parsed_content?.json ?? null, null, 2));
     } catch (err) {
       console.error("Parse request failed", {
         fileName: file.name,
@@ -95,22 +106,48 @@ export default function App() {
       {isParsing && <div style={{ marginBottom: "0.75rem" }}>Parsing document...</div>}
       {error && <div style={{ marginBottom: "0.75rem", color: "#b91c1c" }}>{error}</div>}
 
-      {extractedText && (
+      {(extractedText || parsedJsonText) && (
         <section style={{ marginBottom: "1.25rem" }}>
-          <h2 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>Extracted Text</h2>
-          <pre
+          <div
             style={{
-              whiteSpace: "pre-wrap",
-              background: "#f8fafc",
-              border: "1px solid #e5e7eb",
-              borderRadius: 12,
-              padding: "1rem",
-              maxHeight: 320,
-              overflow: "auto",
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+              gap: "1rem",
             }}
           >
-            {extractedText}
-          </pre>
+            <div>
+              <h2 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>Parsed JSON</h2>
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  background: "#f8fafc",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 12,
+                  padding: "1rem",
+                  maxHeight: 320,
+                  overflow: "auto",
+                }}
+              >
+                {parsedJsonText}
+              </pre>
+            </div>
+            <div>
+              <h2 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>Extracted Text</h2>
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  background: "#f8fafc",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 12,
+                  padding: "1rem",
+                  maxHeight: 320,
+                  overflow: "auto",
+                }}
+              >
+                {extractedText}
+              </pre>
+            </div>
+          </div>
         </section>
       )}
 
