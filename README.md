@@ -43,6 +43,12 @@ uvicorn main:app --reload --port 8000 --log-level debug
 Available endpoints:
 - `GET /health`
 - `POST /parse` (multipart form with `file`)
+- `POST /transcript/analyze` (multipart form with `file`)
+- `GET /units/taxonomy`
+- `POST /units/mappings/upsert`
+- `POST /units/classify-titles`
+- `GET /units/unknowns`
+- `POST /units/unknowns/{unknown_id}/resolve`
 
 `POST /parse` response shape:
 
@@ -65,6 +71,87 @@ Available endpoints:
 `parsed_content.content_kind` is:
 - `structured_json` for valid JSON input (`parsed_content.json` populated)
 - `plain_text` for all other files (`parsed_content.json` is `null`)
+
+Azure OpenAI scaffold for transcript analysis:
+
+Set these environment variables in your shell (or `backend/.env` if your process loader supports it):
+
+```bash
+AZURE_DOC_INTEL_ENABLED=false
+AZURE_DOC_INTEL_ENDPOINT=
+AZURE_DOC_INTEL_API_KEY=
+AZURE_DOC_INTEL_API_VERSION=2024-11-30
+AZURE_DOC_INTEL_MODEL_ID=prebuilt-read
+AZURE_DOC_INTEL_POLL_INTERVAL_SECONDS=1.0
+AZURE_DOC_INTEL_TIMEOUT_SECONDS=45
+
+AZURE_OPENAI_ENABLED=false
+AZURE_OPENAI_ENDPOINT=
+AZURE_OPENAI_API_KEY=
+AZURE_OPENAI_API_VERSION=2024-10-21
+AZURE_OPENAI_DEPLOYMENT=
+AZURE_OPENAI_TEMPERATURE=0
+```
+
+When `AZURE_DOC_INTEL_ENABLED=true` and settings are configured, `/transcript/analyze` uses Azure Document Intelligence first for text extraction, then falls back to local parsing only if DI fails.
+When `AZURE_OPENAI_ENABLED=false`, `/transcript/analyze` still returns extracted text plus provider configuration status.
+Once Azure access is available, set:
+- `AZURE_DOC_INTEL_ENABLED=true`
+- DI endpoint and key
+- `AZURE_OPENAI_ENABLED=true`
+- endpoint, key, deployment
+
+Smoke test:
+
+```bash
+curl -X POST http://127.0.0.1:8000/transcript/analyze \
+  -F "file=@/absolute/path/to/transcript.pdf"
+```
+
+Academic unit classification workflow:
+
+1) Classify course titles (known mappings + rules + unknown queue):
+
+```bash
+curl -X POST http://127.0.0.1:8000/units/classify-titles \
+  -H "Content-Type: application/json" \
+  -d '{
+    "school_id": "school_123",
+    "titles": ["Alg II H", "Physics", "English 11", "US GOV", "Intro to Aerospace"]
+  }'
+```
+
+2) List unknown titles needing review:
+
+```bash
+curl "http://127.0.0.1:8000/units/unknowns?school_id=school_123&status=open&limit=50"
+```
+
+3) Resolve an unknown and automatically create a reusable mapping:
+
+```bash
+curl -X POST http://127.0.0.1:8000/units/unknowns/1/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"other_units","note":"School-specific STEM elective","create_mapping":true}'
+```
+
+4) Manually seed/override mappings for known titles:
+
+```bash
+curl -X POST http://127.0.0.1:8000/units/mappings/upsert \
+  -H "Content-Type: application/json" \
+  -d '{"school_id":"school_123","raw_title":"US GOV","subject":"social_sciences","source":"manual","confidence":1.0}'
+```
+
+Step-by-step debugging:
+
+- Add `?debug=true` to these endpoints to return ordered debug steps with elapsed milliseconds:
+  - `/parse`
+  - `/transcript/analyze`
+  - `/units/classify-titles`
+  - `/units/mappings/upsert`
+  - `/units/unknowns`
+  - `/units/unknowns/{unknown_id}/resolve`
 
 Backend structure (modular):
 - `backend/main.py`: entrypoint for `uvicorn main:app`
