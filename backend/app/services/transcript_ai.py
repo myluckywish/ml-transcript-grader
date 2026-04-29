@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, TypedDict
 
 from app.settings import AzureOpenAISettings
@@ -8,7 +9,6 @@ from app.settings import AzureOpenAISettings
 
 class TranscriptAIResult(TypedDict):
     courses: list[dict[str, Any]]
-    required_units: dict[str, Any]
     gpa: dict[str, Any]
     confidence: float | None
     notes: list[str]
@@ -49,9 +49,98 @@ def _extract_scale(scale_detected: Any) -> float | None:
     return None
 
 
+def _grade_to_points(grade: Any) -> float | None:
+    if not isinstance(grade, str):
+        return None
+    normalized = grade.strip().upper().replace(" ", "")
+    if not normalized:
+        return None
+    if normalized in {"P", "PASS", "CR", "S", "SAT"}:
+        return None
+
+    letter_map = {
+        "A+": 4.0,
+        "A": 4.0,
+        "A-": 3.7,
+        "B+": 3.3,
+        "B": 3.0,
+        "B-": 2.7,
+        "C+": 2.3,
+        "C": 2.0,
+        "C-": 1.7,
+        "D+": 1.3,
+        "D": 1.0,
+        "D-": 0.7,
+        "F": 0.0,
+    }
+    if normalized in letter_map:
+        return letter_map[normalized]
+
+    if re.fullmatch(r"\d{1,3}(\.\d+)?", normalized):
+        value = float(normalized)
+        if value <= 4.0:
+            return max(0.0, min(4.0, value))
+        if value <= 100.0:
+            if value >= 90:
+                return 4.0
+            if value >= 80:
+                return 3.0
+            if value >= 70:
+                return 2.0
+            if value >= 60:
+                return 1.0
+            return 0.0
+    return None
+
+
+def _deterministic_unweighted_from_courses(payload: dict[str, Any]) -> float | None:
+    courses = payload.get("courses")
+    if not isinstance(courses, list):
+        return None
+
+    total_points = 0.0
+    total_credits = 0.0
+    for course in courses:
+        if not isinstance(course, dict):
+            continue
+        grade_points = _to_float(course.get("grade_points"))
+        if grade_points is None:
+            grade_points = _grade_to_points(course.get("grade"))
+        if grade_points is None:
+            continue
+
+        credit = _to_float(course.get("credit"))
+        if credit is None:
+            units = _to_float(course.get("units"))
+            if units is not None:
+                credit = units * 0.5
+        if credit is None or credit <= 0:
+            continue
+
+        # Unweighted GPA caps grade points at 4.0.
+        total_points += max(0.0, min(4.0, grade_points)) * credit
+        total_credits += credit
+
+    if total_credits <= 0:
+        return None
+    return round(total_points / total_credits, 3)
+
+
 def _ensure_unweighted_gpa(payload: dict[str, Any]) -> dict[str, Any]:
     gpa = payload.get("gpa")
     if not isinstance(gpa, dict):
+        gpa = {}
+
+    deterministic = _deterministic_unweighted_from_courses(payload)
+    if deterministic is not None:
+        gpa["unweighted_4_scale"] = deterministic
+        gpa["method"] = "deterministic_from_courses"
+        payload["gpa"] = gpa
+        notes = payload.get("notes")
+        if not isinstance(notes, list):
+            notes = []
+        notes.append("Unweighted GPA computed deterministically from course grades and credits.")
+        payload["notes"] = notes
         return payload
 
     unweighted = _to_float(gpa.get("unweighted_4_scale"))
@@ -106,14 +195,6 @@ def _user_prompt(extracted_text: str) -> str:
         '      "grade_points": number_or_null\n'
         "    }\n"
         "  ],\n"
-        '  "required_units": {\n'
-        '    "mathematics": number_or_null,\n'
-        '    "natural_sciences": number_or_null,\n'
-        '    "social_sciences": number_or_null,\n'
-        '    "foreign_language": number_or_null,\n'
-        '    "other": number_or_null,\n'
-        '    "total": number_or_null\n'
-        "  },\n"
         '  "gpa": {\n'
         '    "reported_weighted": number_or_null,\n'
         '    "unweighted_4_scale": number_or_null,\n'
@@ -124,8 +205,7 @@ def _user_prompt(extracted_text: str) -> str:
         "}\n\n"
         "Conventions:\n"
         "- A unit equals 0.5 credits. If credits are present, convert with: units = credits / 0.5.\n"
-        "- Compute totals for only these buckets: mathematics, natural_sciences, social_sciences, foreign_language, and other.\n"
-        "- required_units values must be the sum of course units in each bucket.\n"
+        "- For each course, include grade and credit when available; keep grade as a normalized value such as A, A-, B+, etc.\n"
         "- If unweighted GPA is present, use/display only unweighted_4_scale.\n"
         "- If only weighted GPA is present, calculate unweighted_4_scale from the transcript data and explain method in notes.\n"
         "- If data is missing, use null and explain briefly in notes.\n\n"
@@ -169,7 +249,6 @@ def analyze_transcript_with_azure_openai(
     payload = _ensure_unweighted_gpa(json.loads(content))
     return TranscriptAIResult(
         courses=payload.get("courses", []),
-        required_units=payload.get("required_units", {}),
         gpa=payload.get("gpa", {}),
         confidence=payload.get("confidence"),
         notes=payload.get("notes", []),
