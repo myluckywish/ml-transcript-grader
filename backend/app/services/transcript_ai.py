@@ -10,7 +10,6 @@ from app.settings import AzureOpenAISettings
 class TranscriptAIResult(TypedDict):
     courses: list[dict[str, Any]]
     gpa: dict[str, Any]
-    confidence: float | None
     notes: list[str]
 
 
@@ -250,6 +249,5 @@ def analyze_transcript_with_azure_openai(
     return TranscriptAIResult(
         courses=payload.get("courses", []),
         gpa=payload.get("gpa", {}),
-        confidence=payload.get("confidence"),
         notes=payload.get("notes", []),
     )

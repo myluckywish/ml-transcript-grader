@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.services.document_intelligence import extract_text_with_azure_document_intelligence
-from app.services.request_debug import RequestTracer
 from app.services.transcript_ai import analyze_transcript_with_azure_openai
 from app.settings import load_azure_document_intelligence_settings, load_azure_openai_settings
 
@@ -22,6 +21,7 @@ CATEGORIES = {
     "foreign_language",
     "other",
 }
+QUALIFIER_TOKENS = {"HONORS", "H", "AP", "IB", "ADV", "ADVANCED", "PREAP", "PRE-AP"}
 
 def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -58,51 +58,66 @@ def _normalize_course_title_for_units(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     normalized = value.upper().strip()
-    normalized = re.sub(r"\b(SEMESTER|SEM|S)\s*(1|2)\b", " ", normalized)
+    normalized = re.sub(r"\b(SEMESTER|SEM|S)[\s\-_:]*(1|2)\b", " ", normalized)
     normalized = re.sub(r"\b(FALL|SPRING|WINTER|SUMMER)\b", " ", normalized)
     normalized = re.sub(r"\b(Q1|Q2|Q3|Q4|TRI1|TRI2|TRI3)\b", " ", normalized)
-    normalized = re.sub(r"\b(QUARTER|QTR|TRIMESTER)\s*(1|2|3|4)\b", " ", normalized)
+    normalized = re.sub(r"\b(QUARTER|QTR|TRIMESTER|TERM)[\s\-_:]*(1|2|3|4)\b", " ", normalized)
     normalized = re.sub(r"\b(PERIOD|PD)\s*\d+\b", " ", normalized)
-    # Remove common trailing credit/grade tokens if OCR/model included them in title.
+    # Remove common trailing credit tokens if OCR/model included them in title.
     normalized = re.sub(r"\b\d+(\.\d+)?\s*(CR|CREDIT|CREDITS)\b", " ", normalized)
-    normalized = re.sub(r"\b(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F)\b$", " ", normalized)
+    # Treat A/B suffixes as semester variants for unit counting.
+    normalized = re.sub(r"\b(A|B)\b$", " ", normalized)
     normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
 
 
+def _extract_qualifier_key(normalized_title: str) -> str:
+    if not normalized_title:
+        return ""
+    words = set(normalized_title.split())
+    qualifiers = sorted(token for token in QUALIFIER_TOKENS if token in words)
+    return "|".join(qualifiers)
+
+
+def _fallback_key_for_missing_title(course: dict[str, Any]) -> str:
+    subject = _normalized_subject(course.get("subject"))
+    units = _course_units(course)
+    units_part = f"{units:.3f}" if units is not None else "none"
+    grade = str(course.get("grade", "")).strip().upper()
+    return f"MISSING|{subject}|{units_part}|{grade}"
+
+
 def _dedupe_courses_for_units(courses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: dict[str, dict[str, Any]] = {}
-    passthrough: list[dict[str, Any]] = []
     for course in courses:
         title = str(course.get("course_title", "")).strip()
         normalized_title = _normalize_course_title_for_units(title)
-        if not normalized_title:
-            passthrough.append(course)
-            continue
+        if normalized_title:
+            qualifier_key = _extract_qualifier_key(normalized_title)
+            dedupe_key = f"{normalized_title}||{qualifier_key}"
+        else:
+            dedupe_key = _fallback_key_for_missing_title(course)
 
-        existing = deduped.get(normalized_title)
+        existing = deduped.get(dedupe_key)
         if existing is None:
-            deduped[normalized_title] = course
+            deduped[dedupe_key] = course
             continue
 
         # Count once policy: keep the row with larger unit value.
         existing_units = _course_units(existing) or 0.0
         candidate_units = _course_units(course) or 0.0
         if candidate_units > existing_units:
-            deduped[normalized_title] = course
+            deduped[dedupe_key] = course
 
-    return [*deduped.values(), *passthrough]
+    return [*deduped.values()]
 
 
 @router.post("/transcript/analyze")
-async def analyze_transcript(file: UploadFile = File(...), debug: bool = False) -> dict[str, Any]:
-    tracer = RequestTracer("transcript_analyze")
+async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
     filename = file.filename or "unknown"
     content_type = file.content_type or "application/octet-stream"
-    tracer.step("metadata_collected", filename=filename, content_type=content_type)
     data = await file.read()
-    tracer.step("file_read", byte_count=len(data))
     logger.debug(
         "Received transcript upload filename=%s content_type=%s bytes=%d",
         filename,
@@ -110,19 +125,10 @@ async def analyze_transcript(file: UploadFile = File(...), debug: bool = False) 
         len(data),
     )
     if not data:
-        tracer.step("validation_failed", reason="empty_upload")
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
         docintel_settings = load_azure_document_intelligence_settings()
-        tracer.step(
-            "docintel_config_loaded",
-            enabled=docintel_settings.enabled,
-            configured=len(docintel_settings.missing_required) == 0,
-            missing_settings=docintel_settings.missing_required,
-            model_id=docintel_settings.model_id,
-        )
-
         if not docintel_settings.enabled:
             raise ValueError("Azure Document Intelligence is disabled. Set AZURE_DOC_INTEL_ENABLED=true.")
         if docintel_settings.missing_required:
@@ -135,37 +141,25 @@ async def analyze_transcript(file: UploadFile = File(...), debug: bool = False) 
             content_type=content_type,
             settings=docintel_settings,
         )
-        tracer.step("text_extracted_docintel", extracted_characters=len(extracted_text))
     except ValueError as exc:
         message = str(exc)
-        tracer.step("parse_failed", error=message)
         if message.startswith("Unsupported file type"):
             raise HTTPException(status_code=415, detail=message) from exc
         raise HTTPException(status_code=422, detail=f"Could not parse file: {message}") from exc
     except Exception as exc:
-        tracer.step("parse_failed", error=str(exc))
         raise HTTPException(status_code=422, detail=f"Could not parse file: {exc}") from exc
     if not extracted_text:
-        tracer.step("validation_failed", reason="empty_extracted_text")
         raise HTTPException(status_code=422, detail="No text could be extracted from this document.")
 
     settings = load_azure_openai_settings()
-    tracer.step(
-        "provider_config_loaded",
-        enabled=settings.enabled,
-        configured=len(settings.missing_required) == 0,
-        missing_settings=settings.missing_required,
-    )
     ai_result: dict[str, Any] | None = None
     if settings.enabled:
         try:
             ai_result = analyze_transcript_with_azure_openai(extracted_text, settings)
-            tracer.step("ai_analysis_completed", has_analysis=ai_result is not None)
         except Exception as exc:
-            tracer.step("ai_analysis_failed", error=str(exc))
             logger.exception("Transcript AI analysis failed for filename=%s", filename)
     else:
-        tracer.step("ai_skipped", reason="provider_disabled")
+        logger.info("Transcript AI analysis skipped because provider is disabled.")
 
     courses = (ai_result or {}).get("courses", [])
     totals_by_category = {
@@ -196,5 +190,4 @@ async def analyze_transcript(file: UploadFile = File(...), debug: bool = False) 
         "totals_by_category": totals_by_category,
         "unweighted_gpa": _to_float(gpa.get("unweighted_4_scale")),
     }
-    tracer.step("response_ready", response_fields=list(response.keys()))
     return response
