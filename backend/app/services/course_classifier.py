@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, TypedDict
 
 from app.services.course_ai_classifier import classify_titles_with_azure_openai
@@ -9,6 +10,21 @@ from app.services.course_taxonomy import CANONICAL_SUBJECTS, guess_subject_from_
 from app.settings import load_azure_openai_settings
 
 logger = logging.getLogger(__name__)
+NON_COURSE_PATTERNS = [
+    re.compile(r"\b(freshman|sophomore|sophmore|junior|senior)\b", re.IGNORECASE),
+    re.compile(r"\b(academic achievement|academic achievements|honor roll|awards?)\b", re.IGNORECASE),
+    re.compile(r"\b(address|street|st\.|avenue|ave\.|city|state|zip)\b", re.IGNORECASE),
+    re.compile(r"\b(student id|id number|date of birth|dob)\b", re.IGNORECASE),
+    re.compile(r"\b(counselor|principal|registrar|signature)\b", re.IGNORECASE),
+]
+NON_COURSE_EXACT = {
+    "english",
+    "math",
+    "mathematics",
+    "science",
+    "social studies",
+    "social science",
+}
 
 
 class ClassifiedCourse(TypedDict):
@@ -37,6 +53,20 @@ def _top_subject(probabilities: dict[str, float]) -> tuple[str, float]:
     return best_subject, best_score
 
 
+def _is_non_course_title(normalized_title: str) -> bool:
+    if not normalized_title:
+        return True
+    title_lower = normalized_title.lower()
+    if title_lower in NON_COURSE_EXACT:
+        return True
+    if re.fullmatch(r"\d{4}", normalized_title):
+        return True
+    for pattern in NON_COURSE_PATTERNS:
+        if pattern.search(normalized_title):
+            return True
+    return False
+
+
 def classify_course_title(
     raw_title: str,
     school_id: str = "",
@@ -53,6 +83,17 @@ def classify_course_title(
             confidence=0.0,
             mapping_id=None,
             unknown_queue_id=unknown.get("id"),
+            subject_probabilities={subject: 0.0 for subject in CANONICAL_SUBJECTS},
+        )
+    if _is_non_course_title(normalized):
+        return ClassifiedCourse(
+            raw_title=raw_title,
+            normalized_title=normalized,
+            subject=None,
+            method="non_course_filtered",
+            confidence=0.0,
+            mapping_id=None,
+            unknown_queue_id=None,
             subject_probabilities={subject: 0.0 for subject in CANONICAL_SUBJECTS},
         )
 
@@ -74,26 +115,26 @@ def classify_course_title(
         ai_probabilities = ai_probabilities_by_title.get(normalized)
         if ai_probabilities:
             best_subject, best_score = _top_subject(ai_probabilities)
-            if best_score >= 0.50:
-                return ClassifiedCourse(
-                    raw_title=raw_title,
-                    normalized_title=normalized,
-                    subject=best_subject,
-                    method="ai_probabilities",
-                    confidence=best_score,
-                    mapping_id=None,
-                    unknown_queue_id=None,
-                    subject_probabilities=ai_probabilities,
-                )
+            return ClassifiedCourse(
+                raw_title=raw_title,
+                normalized_title=normalized,
+                subject=best_subject,
+                method="ai_probabilities",
+                confidence=best_score,
+                mapping_id=None,
+                unknown_queue_id=None,
+                subject_probabilities=ai_probabilities,
+            )
 
     rules_subject = guess_subject_from_rules(normalized)
+    rules_confidence = 0.65
     if rules_subject is not None:
         return ClassifiedCourse(
             raw_title=raw_title,
             normalized_title=normalized,
             subject=rules_subject,
             method="rules",
-            confidence=0.65,
+            confidence=rules_confidence,
             mapping_id=None,
             unknown_queue_id=None,
             subject_probabilities=_one_hot(rules_subject),

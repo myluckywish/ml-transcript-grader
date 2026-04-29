@@ -84,6 +84,14 @@
   min-width: 240px;
 }
 
+.control select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  min-width: 240px;
+  background: #fff;
+}
+
 .primaryBtn,
 .secondaryBtn {
   border: 1px solid transparent;
@@ -124,6 +132,12 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 12px;
+  margin-bottom: 14px;
+}
+
+.detailsToggleRow {
+  display: flex;
+  justify-content: flex-end;
   margin-bottom: 14px;
 }
 

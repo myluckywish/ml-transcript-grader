@@ -2,6 +2,18 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency fallback
+    load_dotenv = None
+
+if load_dotenv is not None:
+    backend_dir = Path(__file__).resolve().parents[1]
+    project_root_dir = Path(__file__).resolve().parents[2]
+    load_dotenv(backend_dir / ".env", override=False)
+    load_dotenv(project_root_dir / ".env", override=False)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

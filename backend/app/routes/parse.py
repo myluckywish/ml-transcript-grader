@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.services.document_parser import parse_document_bytes
+from app.services.document_intelligence import extract_text_with_azure_document_intelligence
 from app.services.request_debug import RequestTracer
+from app.settings import load_azure_document_intelligence_settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +18,13 @@ router = APIRouter()
 async def parse_document(file: UploadFile = File(...), debug: bool = False) -> dict[str, Any]:
     tracer = RequestTracer("parse_document")
     filename = file.filename or "unknown"
-    suffix = Path(filename).suffix.lower()
     content_type = file.content_type or "application/octet-stream"
-    tracer.step("metadata_collected", filename=filename, suffix=suffix, content_type=content_type)
+    tracer.step("metadata_collected", filename=filename, content_type=content_type)
     data = await file.read()
     tracer.step("file_read", byte_count=len(data))
     logger.debug(
-        "Received upload filename=%s suffix=%s content_type=%s bytes=%d",
+        "Received upload filename=%s content_type=%s bytes=%d",
         filename,
-        suffix,
         content_type,
         len(data),
     )
@@ -36,11 +34,29 @@ async def parse_document(file: UploadFile = File(...), debug: bool = False) -> d
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
-        parse_result = parse_document_bytes(data, suffix, content_type)
-        extracted_text = parse_result["extracted_text"]
-        tracer.step("document_parsed", extracted_characters=len(extracted_text))
+        docintel_settings = load_azure_document_intelligence_settings()
+        tracer.step(
+            "docintel_config_loaded",
+            enabled=docintel_settings.enabled,
+            configured=len(docintel_settings.missing_required) == 0,
+            missing_settings=docintel_settings.missing_required,
+            model_id=docintel_settings.model_id,
+        )
+        if not docintel_settings.enabled:
+            raise ValueError("Azure Document Intelligence is disabled. Set AZURE_DOC_INTEL_ENABLED=true.")
+        if docintel_settings.missing_required:
+            raise ValueError(
+                f"Missing Azure Document Intelligence settings: {', '.join(docintel_settings.missing_required)}"
+            )
+
+        extracted_text = extract_text_with_azure_document_intelligence(
+            data=data,
+            content_type=content_type,
+            settings=docintel_settings,
+        )
+        tracer.step("text_extracted_docintel", extracted_characters=len(extracted_text))
         logger.debug(
-            "Parsed document filename=%s extracted_chars=%d",
+            "Parsed document via Azure Document Intelligence filename=%s extracted_chars=%d",
             filename,
             len(extracted_text),
         )
@@ -66,7 +82,23 @@ async def parse_document(file: UploadFile = File(...), debug: bool = False) -> d
         "mime_type": content_type,
         "extracted_text": extracted_text,
         "characters": len(extracted_text),
-        "parsed_content": parse_result["parsed_content"],
+        "parsed_content": {
+            "content_kind": "plain_text",
+            "json": None,
+            "text": extracted_text,
+            "lines": extracted_text.splitlines(),
+            "paragraphs": [chunk.strip() for chunk in extracted_text.split("\n\n") if chunk.strip()],
+        },
+        "extraction_provider": {
+            "name": "azure_document_intelligence",
+            "azure_doc_intel": {
+                "enabled": docintel_settings.enabled,
+                "configured": len(docintel_settings.missing_required) == 0,
+                "missing_settings": docintel_settings.missing_required,
+                "model_id": docintel_settings.model_id,
+                "error": None,
+            },
+        },
     }
     tracer.step("response_ready", response_fields=list(response.keys()))
     if debug:
