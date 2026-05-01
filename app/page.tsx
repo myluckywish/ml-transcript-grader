@@ -5,6 +5,7 @@ import styles from "./page.module.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_PARSER_API_BASE ?? "http://127.0.0.1:8000";
 const ANALYZE_URL = `${API_BASE}/transcript/analyze`;
+const ANALYZE_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_TIMEOUT_MS ?? "90000");
 
 type CourseResult = {
   course_title?: string;
@@ -22,6 +23,10 @@ type AnalyzeResponse = {
   courses?: CourseResult[];
   totals_by_category?: Record<string, number | null>;
   unweighted_gpa?: number | null;
+  warnings?: string[];
+  classification_provider?: {
+    error?: string | null;
+  };
   detail?: string;
 };
 
@@ -42,6 +47,10 @@ function formatApiError(detail: unknown, fallback: string): string {
   return String(detail);
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 export default function App() {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -59,17 +68,24 @@ export default function App() {
     payload.append("file", file);
 
     setIsAnalyzing(true);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS);
     try {
-      const res = await fetch(ANALYZE_URL, { method: "POST", body: payload });
+      const res = await fetch(ANALYZE_URL, { method: "POST", body: payload, signal: controller.signal });
       const data: AnalyzeResponse | ApiErrorBody = await res.json();
       if (!res.ok) {
         setError(formatApiError(data.detail, "Transcript analysis failed."));
         return;
       }
       setAnalyzeData(data as AnalyzeResponse);
-    } catch {
+    } catch (err: unknown) {
+      if (isAbortError(err)) {
+        setError(`Analysis timed out after ${Math.round(ANALYZE_TIMEOUT_MS / 1000)} seconds.`);
+        return;
+      }
       setError("Could not reach backend. Start FastAPI on port 8000.");
     } finally {
+      clearTimeout(timeoutId);
       setIsAnalyzing(false);
     }
   }
@@ -104,6 +120,12 @@ export default function App() {
         {selectedName && <p className={styles.meta}>Selected: {selectedName}</p>}
         {isAnalyzing && <p className={styles.meta}>Analyzing transcript...</p>}
         {error && <p className={styles.error}>{error}</p>}
+        {analyzeData?.warnings?.map((warning, idx) => (
+          <p key={`${warning}-${idx}`} className={styles.meta}>{warning}</p>
+        ))}
+        {analyzeData?.classification_provider?.error && (
+          <p className={styles.error}>Classification issue: {analyzeData.classification_provider.error}</p>
+        )}
       </section>
 
       <section className={styles.gridTwo}>
@@ -135,10 +157,12 @@ export default function App() {
         <label className={styles.control}>
           Category
           <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
+            <option value="english">english</option>
             <option value="mathematics">mathematics</option>
             <option value="natural_sciences">natural_sciences</option>
             <option value="social_sciences">social_sciences</option>
             <option value="foreign_language">foreign_language</option>
+            <option value="other_units">other_units</option>
             <option value="other">other</option>
           </select>
         </label>

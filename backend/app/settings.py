@@ -31,6 +31,7 @@ class AzureOpenAISettings:
     api_version: str
     deployment: str
     temperature: float
+    request_timeout_seconds: float
 
     @property
     def missing_required(self) -> list[str]:
@@ -72,10 +73,15 @@ class AzureDocumentIntelligenceSettings:
 
 def load_azure_openai_settings() -> AzureOpenAISettings:
     temperature_raw = os.getenv("AZURE_OPENAI_TEMPERATURE", "0")
+    timeout_raw = os.getenv("AZURE_OPENAI_TIMEOUT_SECONDS", "45")
     try:
         temperature = float(temperature_raw)
     except ValueError:
         temperature = 0.0
+    try:
+        timeout_seconds = float(timeout_raw)
+    except ValueError:
+        timeout_seconds = 45.0
 
     return AzureOpenAISettings(
         enabled=_env_bool("AZURE_OPENAI_ENABLED", default=False),
@@ -84,6 +90,7 @@ def load_azure_openai_settings() -> AzureOpenAISettings:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21").strip(),
         deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip(),
         temperature=temperature,
+        request_timeout_seconds=max(5.0, timeout_seconds),
     )
 
 

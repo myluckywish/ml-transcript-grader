@@ -15,13 +15,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 CATEGORIES = {
+    "english",
     "mathematics",
     "natural_sciences",
     "social_sciences",
     "foreign_language",
+    "other_units",
     "other",
 }
 QUALIFIER_TOKENS = {"HONORS", "H", "AP", "IB", "ADV", "ADVANCED", "PREAP", "PRE-AP"}
+MIN_EXTRACTED_CHARACTERS = 300
 
 def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -113,6 +116,24 @@ def _dedupe_courses_for_units(courses: list[dict[str, Any]]) -> list[dict[str, A
     return [*deduped.values()]
 
 
+def _extraction_warnings(extracted_text: str) -> list[str]:
+    warnings: list[str] = []
+    stripped = extracted_text.strip()
+    if len(stripped) < MIN_EXTRACTED_CHARACTERS:
+        warnings.append("Very little text was extracted; OCR quality may be low.")
+    if stripped:
+        alnum = sum(1 for ch in stripped if ch.isalnum())
+        ratio = alnum / len(stripped)
+        if ratio < 0.35:
+            warnings.append("Extracted text appears noisy; layout/OCR errors are likely.")
+    lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+    if lines:
+        short_lines = sum(1 for line in lines if len(line) <= 2)
+        if short_lines / len(lines) > 0.25:
+            warnings.append("Many very short lines were detected; columns/tables may be fragmented.")
+    return warnings
+
+
 @router.post("/transcript/analyze")
 async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
     filename = file.filename or "unknown"
@@ -153,20 +174,24 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
 
     settings = load_azure_openai_settings()
     ai_result: dict[str, Any] | None = None
+    ai_error: str | None = None
     if settings.enabled:
         try:
             ai_result = analyze_transcript_with_azure_openai(extracted_text, settings)
         except Exception as exc:
+            ai_error = str(exc)
             logger.exception("Transcript AI analysis failed for filename=%s", filename)
     else:
         logger.info("Transcript AI analysis skipped because provider is disabled.")
 
     courses = (ai_result or {}).get("courses", [])
     totals_by_category = {
+        "english": 0.0,
         "mathematics": 0.0,
         "natural_sciences": 0.0,
         "social_sciences": 0.0,
         "foreign_language": 0.0,
+        "other_units": 0.0,
         "other": 0.0,
     }
     unit_courses = _dedupe_courses_for_units([c for c in courses if isinstance(c, dict)]) if isinstance(courses, list) else []
@@ -181,6 +206,9 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
 
     totals_by_category = {key: round(value, 3) for key, value in totals_by_category.items()}
     gpa = (ai_result or {}).get("gpa", {})
+    warnings = _extraction_warnings(extracted_text)
+    if ai_error:
+        warnings.append("Course classification timed out or failed; totals may be incomplete.")
 
     response = {
         "filename": filename,
@@ -189,5 +217,15 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
         "courses": courses if isinstance(courses, list) else [],
         "totals_by_category": totals_by_category,
         "unweighted_gpa": _to_float(gpa.get("unweighted_4_scale")),
+        "warnings": warnings,
+        "extraction_provider": {
+            "name": "azure_document_intelligence",
+            "azure_doc_intel_model_id": docintel_settings.model_id,
+        },
+        "classification_provider": {
+            "name": "azure_openai",
+            "enabled": settings.enabled,
+            "error": ai_error,
+        },
     }
     return response

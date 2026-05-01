@@ -91,6 +91,13 @@ AZURE_OPENAI_API_KEY=
 AZURE_OPENAI_API_VERSION=2024-10-21
 AZURE_OPENAI_DEPLOYMENT=
 AZURE_OPENAI_TEMPERATURE=0
+AZURE_OPENAI_TIMEOUT_SECONDS=45
+```
+
+Frontend timeout (optional):
+
+```bash
+NEXT_PUBLIC_ANALYZE_TIMEOUT_MS=90000
 ```
 
 When `AZURE_DOC_INTEL_ENABLED=true` and settings are configured, `/transcript/analyze` uses Azure Document Intelligence first for text extraction, then falls back to local parsing only if DI fails.

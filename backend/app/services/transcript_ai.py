@@ -130,6 +130,15 @@ def _ensure_unweighted_gpa(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(gpa, dict):
         gpa = {}
 
+    # If the transcript already provides an unweighted value, preserve it directly.
+    unweighted = _to_float(gpa.get("unweighted_4_scale"))
+    if unweighted is not None:
+        gpa["unweighted_4_scale"] = round(max(0.0, min(4.0, unweighted)), 3)
+        if not gpa.get("method"):
+            gpa["method"] = "provided_unweighted"
+        payload["gpa"] = gpa
+        return payload
+
     deterministic = _deterministic_unweighted_from_courses(payload)
     if deterministic is not None:
         gpa["unweighted_4_scale"] = deterministic
@@ -140,12 +149,6 @@ def _ensure_unweighted_gpa(payload: dict[str, Any]) -> dict[str, Any]:
             notes = []
         notes.append("Unweighted GPA computed deterministically from course grades and credits.")
         payload["notes"] = notes
-        return payload
-
-    unweighted = _to_float(gpa.get("unweighted_4_scale"))
-    if unweighted is not None:
-        gpa["unweighted_4_scale"] = round(max(0.0, min(4.0, unweighted)), 3)
-        payload["gpa"] = gpa
         return payload
 
     weighted = _to_float(gpa.get("reported_weighted"))
@@ -187,7 +190,7 @@ def _user_prompt(extracted_text: str) -> str:
         '  "courses": [\n'
         "    {\n"
         '      "course_title": string,\n'
-        '      "subject": "mathematics" | "natural_sciences" | "social_sciences" | "foreign_language" | "other",\n'
+        '      "subject": "english" | "mathematics" | "natural_sciences" | "social_sciences" | "foreign_language" | "other_units" | "other",\n'
         '      "units": number_or_null,\n'
         '      "credit": number_or_null,\n'
         '      "grade": string_or_null,\n'
@@ -237,6 +240,7 @@ def analyze_transcript_with_azure_openai(
     completion = client.chat.completions.create(
         model=settings.deployment,
         temperature=settings.temperature,
+        timeout=settings.request_timeout_seconds,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": _system_prompt()},
