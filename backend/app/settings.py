@@ -111,7 +111,7 @@ def load_azure_document_intelligence_settings() -> AzureDocumentIntelligenceSett
         endpoint=os.getenv("AZURE_DOC_INTEL_ENDPOINT", "").strip(),
         api_key=os.getenv("AZURE_DOC_INTEL_API_KEY", "").strip(),
         api_version=os.getenv("AZURE_DOC_INTEL_API_VERSION", "2024-11-30").strip(),
-        model_id=os.getenv("AZURE_DOC_INTEL_MODEL_ID", "prebuilt-read").strip(),
+        model_id=os.getenv("AZURE_DOC_INTEL_MODEL_ID", "prebuilt-layout").strip(),
         poll_interval_seconds=max(0.2, poll_interval),
         timeout_seconds=max(5.0, timeout_seconds),
     )

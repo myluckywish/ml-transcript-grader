@@ -25,6 +25,7 @@ CATEGORIES = {
 }
 QUALIFIER_TOKENS = {"HONORS", "H", "AP", "IB", "ADV", "ADVANCED", "PREAP", "PRE-AP"}
 MIN_EXTRACTED_CHARACTERS = 300
+MAX_ANCHOR_COURSE_LINES = 40
 
 def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -134,6 +135,38 @@ def _extraction_warnings(extracted_text: str) -> list[str]:
     return warnings
 
 
+def _extract_pre_anchors(extracted_text: str) -> dict[str, Any]:
+    compact = re.sub(r"\s+", " ", extracted_text)
+    lowered = compact.lower()
+
+    unweighted_match = re.search(r"unweighted[^0-9]{0,24}(\d(?:\.\d{1,3})?)", lowered, flags=re.IGNORECASE)
+    weighted_match = re.search(r"weighted[^0-9]{0,24}(\d(?:\.\d{1,3})?)", lowered, flags=re.IGNORECASE)
+
+    course_lines: list[str] = []
+    grade_line_pattern = re.compile(r"\b(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|P|PASS|CR|S)\b", re.IGNORECASE)
+    credit_pattern = re.compile(r"\b\d(?:\.\d{1,2})?\b")
+    for raw_line in extracted_text.splitlines():
+        line = raw_line.strip()
+        if len(line) < 6:
+            continue
+        if not grade_line_pattern.search(line):
+            continue
+        if not credit_pattern.search(line):
+            continue
+        course_lines.append(line)
+        if len(course_lines) >= MAX_ANCHOR_COURSE_LINES:
+            break
+
+    anchors: dict[str, Any] = {
+        "gpa": {
+            "unweighted_4_scale": float(unweighted_match.group(1)) if unweighted_match else None,
+            "reported_weighted": float(weighted_match.group(1)) if weighted_match else None,
+        },
+        "course_line_candidates": course_lines,
+    }
+    return anchors
+
+
 @router.post("/transcript/analyze")
 async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
     filename = file.filename or "unknown"
@@ -177,7 +210,12 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
     ai_error: str | None = None
     if settings.enabled:
         try:
-            ai_result = analyze_transcript_with_azure_openai(extracted_text, settings)
+            anchors = _extract_pre_anchors(extracted_text)
+            ai_result = analyze_transcript_with_azure_openai(
+                extracted_text,
+                settings,
+                pre_extracted_anchors=anchors,
+            )
         except Exception as exc:
             ai_error = str(exc)
             logger.exception("Transcript AI analysis failed for filename=%s", filename)
@@ -226,6 +264,7 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
             "name": "azure_openai",
             "enabled": settings.enabled,
             "error": ai_error,
+            "use_pre_extraction": True,
         },
     }
     return response

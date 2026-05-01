@@ -116,7 +116,6 @@ export default function App() {
           <strong>Drop transcript or click to upload</strong>
           <span>PDF, DOCX, TXT and other supported files</span>
         </div>
-
         {selectedName && <p className={styles.meta}>Selected: {selectedName}</p>}
         {isAnalyzing && <p className={styles.meta}>Analyzing transcript...</p>}
         {error && <p className={styles.error}>{error}</p>}

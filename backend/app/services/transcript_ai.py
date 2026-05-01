@@ -183,7 +183,14 @@ def _system_prompt() -> str:
     )
 
 
-def _user_prompt(extracted_text: str) -> str:
+def _user_prompt(extracted_text: str, pre_extracted_anchors: dict[str, Any] | None = None) -> str:
+    anchors_block = ""
+    if pre_extracted_anchors:
+        anchors_json = json.dumps(pre_extracted_anchors, ensure_ascii=False)
+        anchors_block = (
+            "Pre-extracted anchors from deterministic parsing (prefer these when consistent with transcript):\n"
+            f"{anchors_json}\n\n"
+        )
     return (
         "Analyze the transcript text and output JSON with this exact shape:\n"
         "{\n"
@@ -211,6 +218,7 @@ def _user_prompt(extracted_text: str) -> str:
         "- If unweighted GPA is present, use/display only unweighted_4_scale.\n"
         "- If only weighted GPA is present, calculate unweighted_4_scale from the transcript data and explain method in notes.\n"
         "- If data is missing, use null and explain briefly in notes.\n\n"
+        f"{anchors_block}"
         f"Transcript text:\n{extracted_text}"
     )
 
@@ -218,6 +226,7 @@ def _user_prompt(extracted_text: str) -> str:
 def analyze_transcript_with_azure_openai(
     extracted_text: str,
     settings: AzureOpenAISettings,
+    pre_extracted_anchors: dict[str, Any] | None = None,
 ) -> TranscriptAIResult:
     if not settings.enabled:
         raise ValueError("Azure OpenAI is disabled.")
@@ -244,7 +253,7 @@ def analyze_transcript_with_azure_openai(
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": _system_prompt()},
-            {"role": "user", "content": _user_prompt(extracted_text)},
+            {"role": "user", "content": _user_prompt(extracted_text, pre_extracted_anchors=pre_extracted_anchors)},
         ],
     )
 
