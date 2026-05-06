@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import queue
 import re
+import threading
+import time
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -26,6 +31,14 @@ CATEGORIES = {
 QUALIFIER_TOKENS = {"HONORS", "H", "AP", "IB", "ADV", "ADVANCED", "PREAP", "PRE-AP"}
 MIN_EXTRACTED_CHARACTERS = 300
 MAX_ANCHOR_COURSE_LINES = 40
+TRANSCRIPT_WORKERS = max(1, int(os.getenv("TRANSCRIPT_WORKERS", "10")))
+MAX_BATCH_FILES = 10
+
+_jobs_lock = threading.Lock()
+_job_queue: queue.Queue[str] = queue.Queue()
+_jobs: dict[str, dict[str, Any]] = {}
+_batches: dict[str, dict[str, Any]] = {}
+_workers_started = False
 
 def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -167,17 +180,7 @@ def _extract_pre_anchors(extracted_text: str) -> dict[str, Any]:
     return anchors
 
 
-@router.post("/transcript/analyze")
-async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
-    filename = file.filename or "unknown"
-    content_type = file.content_type or "application/octet-stream"
-    data = await file.read()
-    logger.debug(
-        "Received transcript upload filename=%s content_type=%s bytes=%d",
-        filename,
-        content_type,
-        len(data),
-    )
+def _analyze_transcript_content(filename: str, content_type: str, data: bytes) -> dict[str, Any]:
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
@@ -200,6 +203,8 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
         if message.startswith("Unsupported file type"):
             raise HTTPException(status_code=415, detail=message) from exc
         raise HTTPException(status_code=422, detail=f"Could not parse file: {message}") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not parse file: {exc}") from exc
     if not extracted_text:
@@ -248,7 +253,7 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
     if ai_error:
         warnings.append("Course classification timed out or failed; totals may be incomplete.")
 
-    response = {
+    return {
         "filename": filename,
         "mime_type": content_type,
         "characters": len(extracted_text),
@@ -267,4 +272,254 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
             "use_pre_extraction": True,
         },
     }
+
+
+def _update_job(job_id: str, **changes: Any) -> None:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job.update(changes)
+        job["updated_at"] = time.time()
+
+
+def _worker_loop() -> None:
+    while True:
+        job_id = _job_queue.get()
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+        if not job:
+            _job_queue.task_done()
+            continue
+        _update_job(job_id, status="running", error=None)
+        try:
+            result = _analyze_transcript_content(
+                filename=job["filename"],
+                content_type=job["content_type"],
+                data=job["data"],
+            )
+            _update_job(job_id, status="succeeded", result=result)
+        except HTTPException as exc:
+            _update_job(job_id, status="failed", error=str(exc.detail))
+        except Exception as exc:
+            logger.exception("Unexpected transcript job failure job_id=%s", job_id)
+            _update_job(job_id, status="failed", error=str(exc))
+        finally:
+            with _jobs_lock:
+                existing = _jobs.get(job_id)
+                if existing is not None:
+                    existing.pop("data", None)
+            _job_queue.task_done()
+
+
+def _ensure_workers_started() -> None:
+    global _workers_started
+    if _workers_started:
+        return
+    with _jobs_lock:
+        if _workers_started:
+            return
+        for _ in range(TRANSCRIPT_WORKERS):
+            thread = threading.Thread(target=_worker_loop, daemon=True)
+            thread.start()
+        _workers_started = True
+
+
+@router.post("/transcript/analyze")
+async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
+    filename = file.filename or "unknown"
+    content_type = file.content_type or "application/octet-stream"
+    data = await file.read()
+    logger.debug(
+        "Received transcript upload filename=%s content_type=%s bytes=%d",
+        filename,
+        content_type,
+        len(data),
+    )
+    return _analyze_transcript_content(filename=filename, content_type=content_type, data=data)
+
+
+@router.post("/transcript/analyze/submit")
+async def submit_transcript_analysis(file: UploadFile = File(...)) -> dict[str, Any]:
+    _ensure_workers_started()
+    filename = file.filename or "unknown"
+    content_type = file.content_type or "application/octet-stream"
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    job_id = uuid.uuid4().hex
+    now = time.time()
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "filename": filename,
+            "content_type": content_type,
+            "created_at": now,
+            "updated_at": now,
+            "error": None,
+            "result": None,
+            "data": data,
+        }
+    _job_queue.put(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/transcript/batches/submit")
+async def submit_transcript_batch(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files were provided.")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_BATCH_FILES} files are allowed per batch.",
+        )
+
+    _ensure_workers_started()
+    batch_id = uuid.uuid4().hex
+    now = time.time()
+    queued_jobs: list[dict[str, Any]] = []
+    skipped_files: list[dict[str, Any]] = []
+
+    for file in files:
+        filename = file.filename or "unknown"
+        content_type = file.content_type or "application/octet-stream"
+        data = await file.read()
+        if not data:
+            skipped_files.append(
+                {
+                    "filename": filename,
+                    "content_type": content_type,
+                    "error": "Uploaded file is empty.",
+                }
+            )
+            continue
+
+        job_id = uuid.uuid4().hex
+        with _jobs_lock:
+            _jobs[job_id] = {
+                "id": job_id,
+                "batch_id": batch_id,
+                "status": "queued",
+                "filename": filename,
+                "content_type": content_type,
+                "created_at": now,
+                "updated_at": now,
+                "error": None,
+                "result": None,
+                "data": data,
+            }
+        _job_queue.put(job_id)
+        queued_jobs.append(
+            {
+                "job_id": job_id,
+                "filename": filename,
+                "content_type": content_type,
+                "status": "queued",
+            }
+        )
+
+    with _jobs_lock:
+        _batches[batch_id] = {
+            "id": batch_id,
+            "created_at": now,
+            "updated_at": now,
+            "job_ids": [j["job_id"] for j in queued_jobs],
+            "total_files": len(files),
+            "skipped_files": skipped_files,
+        }
+
+    return {
+        "batch_id": batch_id,
+        "status": "queued",
+        "total_files": len(files),
+        "queued_jobs": queued_jobs,
+        "skipped_files": skipped_files,
+    }
+
+
+@router.get("/transcript/jobs/{job_id}")
+async def get_transcript_analysis_job(job_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        response = {
+            "job_id": job["id"],
+            "status": job["status"],
+            "filename": job["filename"],
+            "created_at": job["created_at"],
+            "updated_at": job["updated_at"],
+            "error": job.get("error"),
+            "result": job.get("result"),
+        }
+    return response
+
+
+@router.get("/transcript/batches/{batch_id}")
+async def get_transcript_batch(batch_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        batch = _batches.get(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found.")
+
+        jobs = [job for job_id in batch["job_ids"] if (job := _jobs.get(job_id))]
+        skipped_files = batch.get("skipped_files", [])
+
+        counts = {
+            "queued": 0,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": len(skipped_files),
+        }
+        for job in jobs:
+            status = job.get("status", "")
+            if status in counts:
+                counts[status] += 1
+
+        done_count = counts["succeeded"] + counts["failed"] + counts["skipped"]
+        total_count = len(jobs) + len(skipped_files)
+        progress_percent = round((done_count / total_count) * 100, 2) if total_count else 100.0
+
+        if counts["running"] > 0:
+            batch_status = "running"
+        elif counts["queued"] > 0:
+            batch_status = "queued"
+        elif counts["failed"] > 0:
+            batch_status = "completed_with_errors"
+        else:
+            batch_status = "succeeded"
+
+        job_results = [
+            {
+                "job_id": job["id"],
+                "status": job["status"],
+                "filename": job["filename"],
+                "created_at": job["created_at"],
+                "updated_at": job["updated_at"],
+                "error": job.get("error"),
+                "result": job.get("result"),
+            }
+            for job in jobs
+        ]
+
+        response = {
+            "batch_id": batch["id"],
+            "status": batch_status,
+            "created_at": batch["created_at"],
+            "updated_at": max(
+                [batch["updated_at"], *[job["updated_at"] for job in jobs]],
+            ),
+            "total_files": batch["total_files"],
+            "progress": {
+                "completed": done_count,
+                "total": total_count,
+                "percent": progress_percent,
+                **counts,
+            },
+            "jobs": job_results,
+            "skipped_files": skipped_files,
+        }
     return response

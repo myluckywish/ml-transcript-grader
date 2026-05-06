@@ -44,6 +44,10 @@ Available endpoints:
 - `GET /health`
 - `POST /parse` (multipart form with `file`)
 - `POST /transcript/analyze` (multipart form with `file`)
+- `POST /transcript/analyze/submit` (multipart form with `file`, returns `job_id`)
+- `GET /transcript/jobs/{job_id}` (poll transcript analysis status/result)
+- `POST /transcript/batches/submit` (multipart form with `files`, returns `batch_id` + job list)
+- `GET /transcript/batches/{batch_id}` (poll batch progress + per-job results)
 - `GET /units/taxonomy`
 - `POST /units/mappings/upsert`
 - `POST /units/classify-titles`
@@ -84,6 +88,7 @@ AZURE_DOC_INTEL_API_VERSION=2024-11-30
 AZURE_DOC_INTEL_MODEL_ID=prebuilt-layout
 AZURE_DOC_INTEL_POLL_INTERVAL_SECONDS=1.0
 AZURE_DOC_INTEL_TIMEOUT_SECONDS=45
+TRANSCRIPT_WORKERS=10
 
 AZURE_OPENAI_ENABLED=false
 AZURE_OPENAI_ENDPOINT=
@@ -97,7 +102,8 @@ AZURE_OPENAI_TIMEOUT_SECONDS=45
 Frontend timeout (optional):
 
 ```bash
-NEXT_PUBLIC_ANALYZE_TIMEOUT_MS=90000
+NEXT_PUBLIC_ANALYZE_POLL_INTERVAL_MS=1500
+NEXT_PUBLIC_ANALYZE_MAX_WAIT_MS=600000
 ```
 
 When `AZURE_DOC_INTEL_ENABLED=true` and settings are configured, `/transcript/analyze` uses Azure Document Intelligence first for text extraction, then falls back to local parsing only if DI fails.

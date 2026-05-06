@@ -4,8 +4,10 @@ import React, { useState } from "react";
 import styles from "./page.module.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_PARSER_API_BASE ?? "http://127.0.0.1:8000";
-const ANALYZE_URL = `${API_BASE}/transcript/analyze`;
-const ANALYZE_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_TIMEOUT_MS ?? "90000");
+const BATCH_SUBMIT_URL = `${API_BASE}/transcript/batches/submit`;
+const ANALYZE_POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_POLL_INTERVAL_MS ?? "1500");
+const ANALYZE_MAX_WAIT_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_MAX_WAIT_MS ?? "600000");
+const MAX_BATCH_FILES = 10;
 
 type CourseResult = {
   course_title?: string;
@@ -27,11 +29,39 @@ type AnalyzeResponse = {
   classification_provider?: {
     error?: string | null;
   };
-  detail?: string;
 };
 
 type ApiErrorBody = {
   detail?: unknown;
+};
+
+type BatchSubmitResponse = {
+  batch_id?: string;
+  status?: string;
+};
+
+type BatchJob = {
+  job_id?: string;
+  status?: string;
+  filename?: string;
+  error?: string | null;
+  result?: AnalyzeResponse | null;
+};
+
+type BatchStatusResponse = {
+  batch_id?: string;
+  status?: string;
+  progress?: {
+    completed?: number;
+    total?: number;
+    percent?: number;
+    queued?: number;
+    running?: number;
+    succeeded?: number;
+    failed?: number;
+    skipped?: number;
+  };
+  jobs?: BatchJob[];
 };
 
 function formatApiError(detail: unknown, fallback: string): string {
@@ -47,45 +77,70 @@ function formatApiError(detail: unknown, fallback: string): string {
   return String(detail);
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export default function App() {
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedNames, setSelectedNames] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [analyzeData, setAnalyzeData] = useState<AnalyzeResponse | null>(null);
+  const [batchStatus, setBatchStatus] = useState<BatchStatusResponse | null>(null);
   const [selectedCategory, setSelectedCategory] = useState("mathematics");
 
-  async function analyzeTranscript(file?: File | null) {
-    if (!file) return;
-    setSelectedName(file.name);
+  async function analyzeBatch(fileList?: FileList | null) {
+    const files = Array.from(fileList ?? []);
+    if (files.length === 0) return;
+    if (files.length > MAX_BATCH_FILES) {
+      setError(`You can upload up to ${MAX_BATCH_FILES} files per batch.`);
+      return;
+    }
+
+    setSelectedNames(files.map((file) => file.name));
     setError(null);
-    setAnalyzeData(null);
+    setBatchStatus(null);
 
     const payload = new FormData();
-    payload.append("file", file);
+    files.forEach((file) => payload.append("files", file));
 
     setIsAnalyzing(true);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS);
     try {
-      const res = await fetch(ANALYZE_URL, { method: "POST", body: payload, signal: controller.signal });
-      const data: AnalyzeResponse | ApiErrorBody = await res.json();
-      if (!res.ok) {
-        setError(formatApiError(data.detail, "Transcript analysis failed."));
+      const submitRes = await fetch(BATCH_SUBMIT_URL, { method: "POST", body: payload });
+      const submitData: BatchSubmitResponse | ApiErrorBody = await submitRes.json();
+      if (!submitRes.ok) {
+        setError(formatApiError((submitData as ApiErrorBody).detail, "Could not queue transcript batch."));
         return;
       }
-      setAnalyzeData(data as AnalyzeResponse);
+      const batchId = (submitData as BatchSubmitResponse).batch_id;
+      if (!batchId) {
+        setError("Transcript batch did not return a batch id.");
+        return;
+      }
+
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < ANALYZE_MAX_WAIT_MS) {
+        const statusRes = await fetch(`${API_BASE}/transcript/batches/${batchId}`);
+        const statusData: BatchStatusResponse | ApiErrorBody = await statusRes.json();
+        if (!statusRes.ok) {
+          setError(formatApiError((statusData as ApiErrorBody).detail, "Failed to read transcript batch status."));
+          return;
+        }
+        const batch = statusData as BatchStatusResponse;
+        setBatchStatus(batch);
+
+        if (batch.status === "succeeded" || batch.status === "completed_with_errors") {
+          return;
+        }
+        await sleep(ANALYZE_POLL_INTERVAL_MS);
+      }
+
+      setError(`Analysis exceeded ${Math.round(ANALYZE_MAX_WAIT_MS / 1000)} seconds.`);
     } catch (err: unknown) {
-      if (isAbortError(err)) {
-        setError(`Analysis timed out after ${Math.round(ANALYZE_TIMEOUT_MS / 1000)} seconds.`);
-        return;
-      }
+      console.error(err);
       setError("Could not reach backend. Start FastAPI on port 8000.");
     } finally {
-      clearTimeout(timeoutId);
       setIsAnalyzing(false);
     }
   }
@@ -94,7 +149,7 @@ export default function App() {
     <main className={styles.page}>
       <section className={styles.headerCard}>
         <h1 className={styles.title}>Transcript Parser</h1>
-        <p className={styles.subtitle}>Upload transcript, then view category totals and unweighted GPA.</p>
+        <p className={styles.subtitle}>Upload up to 10 transcripts, then expand each one to review all counted attributes.</p>
       </section>
 
       <section className={styles.uploadCard}>
@@ -103,78 +158,112 @@ export default function App() {
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
             e.preventDefault();
-            void analyzeTranscript(e.dataTransfer.files?.[0]);
+            void analyzeBatch(e.dataTransfer.files);
           }}
-          onClick={() => document.getElementById("transcript-file")?.click()}
+          onClick={() => document.getElementById("transcript-files")?.click()}
         >
           <input
-            id="transcript-file"
+            id="transcript-files"
             type="file"
             className={styles.hiddenInput}
-            onChange={(e) => void analyzeTranscript(e.target.files?.[0])}
+            multiple
+            onChange={(e) => void analyzeBatch(e.target.files)}
           />
-          <strong>Drop transcript or click to upload</strong>
-          <span>PDF, DOCX, TXT and other supported files</span>
+          <strong>Drop transcripts or click to upload</strong>
+          <span>Up to 10 files per batch</span>
         </div>
-        {selectedName && <p className={styles.meta}>Selected: {selectedName}</p>}
-        {isAnalyzing && <p className={styles.meta}>Analyzing transcript...</p>}
-        {error && <p className={styles.error}>{error}</p>}
-        {analyzeData?.warnings?.map((warning, idx) => (
-          <p key={`${warning}-${idx}`} className={styles.meta}>{warning}</p>
-        ))}
-        {analyzeData?.classification_provider?.error && (
-          <p className={styles.error}>Classification issue: {analyzeData.classification_provider.error}</p>
+
+        {selectedNames.length > 0 && (
+          <p className={styles.meta}>Selected: {selectedNames.length} file(s)</p>
         )}
-      </section>
 
-      <section className={styles.gridTwo}>
-        <article className={styles.card}>
-          <h2>Unweighted GPA</h2>
-          <div className={styles.statGrid}>
-            <div className={styles.statTile}>
-              <span>GPA (4.0)</span>
-              <strong>{analyzeData?.unweighted_gpa ?? "N/A"}</strong>
-            </div>
-          </div>
-        </article>
+        {isAnalyzing && (
+          <p className={styles.meta}>
+            Batch status: {batchStatus?.status ?? "queued"} ({batchStatus?.progress?.percent ?? 0}%)
+          </p>
+        )}
 
-        <article className={styles.card}>
-          <h2>Totals by Category</h2>
-          <ul className={styles.unitList}>
-            {Object.entries(analyzeData?.totals_by_category ?? {}).map(([subject, value]) => (
-              <li key={subject}>
-                <span>{subject}</span>
-                <strong>{value ?? "N/A"}</strong>
-              </li>
-            ))}
-          </ul>
-        </article>
+        {batchStatus?.progress && (
+          <p className={styles.meta}>
+            Completed {batchStatus.progress.completed ?? 0}/{batchStatus.progress.total ?? 0} | queued {batchStatus.progress.queued ?? 0} |
+            running {batchStatus.progress.running ?? 0} | succeeded {batchStatus.progress.succeeded ?? 0} | failed {batchStatus.progress.failed ?? 0}
+          </p>
+        )}
+
+        {error && <p className={styles.error}>{error}</p>}
       </section>
 
       <section className={styles.card}>
-        <h2>Counted Courses by Category</h2>
-        <label className={styles.control}>
-          Category
-          <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
-            <option value="english">english</option>
-            <option value="mathematics">mathematics</option>
-            <option value="natural_sciences">natural_sciences</option>
-            <option value="social_sciences">social_sciences</option>
-            <option value="foreign_language">foreign_language</option>
-            <option value="other_units">other_units</option>
-            <option value="other">other</option>
-          </select>
-        </label>
-        <ul className={styles.unitList}>
-          {(analyzeData?.courses ?? [])
-            .filter((course) => (course.subject ?? "").toLowerCase() === selectedCategory)
-            .map((course, index) => (
-              <li key={`${course.course_title ?? "course"}-${index}`}>
-                <span>{course.course_title ?? "Unnamed course"}</span>
-                <strong>{selectedCategory}</strong>
-              </li>
-            ))}
-        </ul>
+        <h2>Batch Results</h2>
+        {!batchStatus?.jobs?.length && <p className={styles.meta}>No results yet.</p>}
+        <div className={styles.resultsStack}>
+          {(batchStatus?.jobs ?? []).map((job, idx) => {
+            const result = job.result ?? null;
+            return (
+              <details key={`${job.job_id ?? "job"}-${idx}`} className={styles.transcriptItem}>
+                <summary>
+                  <span>{job.filename ?? result?.filename ?? `Transcript ${idx + 1}`}</span>
+                  <strong>{job.status ?? "unknown"}</strong>
+                </summary>
+
+                {job.error && <p className={styles.error}>Error: {job.error}</p>}
+
+                {result?.warnings?.map((warning, warningIdx) => (
+                  <p key={`${warning}-${warningIdx}`} className={styles.meta}>{warning}</p>
+                ))}
+
+                {result?.classification_provider?.error && (
+                  <p className={styles.error}>Classification issue: {result.classification_provider.error}</p>
+                )}
+
+                {result && (
+                  <>
+                    <div className={styles.statGrid}>
+                      <div className={styles.statTile}>
+                        <span>Unweighted GPA</span>
+                        <strong>{result.unweighted_gpa ?? "N/A"}</strong>
+                      </div>
+                    </div>
+
+                    <h3 className={styles.sectionTitle}>Totals by Category</h3>
+                    <ul className={styles.unitList}>
+                      {Object.entries(result.totals_by_category ?? {}).map(([subject, value]) => (
+                        <li key={subject}>
+                          <span>{subject}</span>
+                          <strong>{value ?? "N/A"}</strong>
+                        </li>
+                      ))}
+                    </ul>
+
+                    <h3 className={styles.sectionTitle}>Counted Courses</h3>
+                    <label className={styles.control}>
+                      Category
+                      <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
+                        <option value="english">english</option>
+                        <option value="mathematics">mathematics</option>
+                        <option value="natural_sciences">natural_sciences</option>
+                        <option value="social_sciences">social_sciences</option>
+                        <option value="foreign_language">foreign_language</option>
+                        <option value="other_units">other_units</option>
+                        <option value="other">other</option>
+                      </select>
+                    </label>
+                    <ul className={styles.unitList}>
+                      {(result.courses ?? [])
+                        .filter((course) => (course.subject ?? "").toLowerCase() === selectedCategory)
+                        .map((course, courseIdx) => (
+                        <li key={`${course.course_title ?? "course"}-${courseIdx}`}>
+                          <span>{course.course_title ?? "Unnamed course"}</span>
+                          <strong>{selectedCategory}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </details>
+            );
+          })}
+        </div>
       </section>
     </main>
   );
