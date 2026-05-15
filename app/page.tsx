@@ -83,6 +83,11 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function isNonCountedGrade(grade?: string | null): boolean {
+  const normalized = String(grade ?? "").trim().toUpperCase();
+  return normalized === "F" || normalized === "U" || normalized === "E";
+}
+
 export default function App() {
   const [selectedNames, setSelectedNames] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -251,6 +256,7 @@ export default function App() {
                     <ul className={styles.unitList}>
                       {(result.courses ?? [])
                         .filter((course) => (course.subject ?? "").toLowerCase() === selectedCategory)
+                        .filter((course) => !isNonCountedGrade(course.grade))
                         .map((course, courseIdx) => (
                         <li key={`${course.course_title ?? "course"}-${courseIdx}`}>
                           <span>{course.course_title ?? "Unnamed course"}</span>

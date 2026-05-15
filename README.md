@@ -24,7 +24,7 @@ Override this with:
 NEXT_PUBLIC_PARSER_API_URL=http://127.0.0.1:8000/parse npm run dev
 ```
 
-## Backend (FastAPI + pdfplumber)
+## Backend (FastAPI)
 
 ```bash
 cd backend
@@ -106,7 +106,8 @@ NEXT_PUBLIC_ANALYZE_POLL_INTERVAL_MS=1500
 NEXT_PUBLIC_ANALYZE_MAX_WAIT_MS=600000
 ```
 
-When `AZURE_DOC_INTEL_ENABLED=true` and settings are configured, `/transcript/analyze` uses Azure Document Intelligence first for text extraction, then falls back to local parsing only if DI fails.
+When `AZURE_DOC_INTEL_ENABLED=true` and settings are configured, `/transcript/analyze` uses Azure Document Intelligence for text extraction.
+If parsing fails, analysis stops and the API returns an error.
 When `AZURE_OPENAI_ENABLED=false`, `/transcript/analyze` still returns extracted text plus provider configuration status.
 Once Azure access is available, set:
 - `AZURE_DOC_INTEL_ENABLED=true`
@@ -160,7 +161,6 @@ Step-by-step debugging:
 
 - Add `?debug=true` to these endpoints to return ordered debug steps with elapsed milliseconds:
   - `/parse`
-  - `/transcript/analyze`
   - `/units/classify-titles`
   - `/units/mappings/upsert`
   - `/units/unknowns`
@@ -169,13 +169,11 @@ Step-by-step debugging:
 Backend structure (modular):
 - `backend/main.py`: entrypoint for `uvicorn main:app`
 - `backend/app/main.py`: API routes and request handling
-- `backend/app/services/document_parser.py`: parser routing logic by file type
-- `backend/app/parsers/`: file-type specific extractors (`pdf`, `docx`, `text`)
+- `backend/app/services/transcript_pipeline.py`: transcript extraction + AI analysis pipeline
+- `backend/app/services/transcript_jobs.py`: background job queue and batch tracking
 
 Supported document types:
-- `PDF` via `pdfplumber`
-- `DOCX` basic text extraction
-- Text-like files: `TXT`, `MD`, `CSV`, `JSON`, `YAML`, `XML`, `HTML`
+- `PDF`, `DOCX`, and image/text formats supported by Azure Document Intelligence configuration
 
 Debug notes:
 - Backend logs parser selection, upload metadata, extracted character counts, and full exception traces.
