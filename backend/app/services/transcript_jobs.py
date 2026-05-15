@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from app.services.transcript_pipeline import analyze_transcript_content
 
 TRANSCRIPT_WORKERS = max(1, int(os.getenv("TRANSCRIPT_WORKERS", "10")))
-MAX_BATCH_FILES = 10
+MAX_BATCH_FILES = max(1, int(os.getenv("MAX_BATCH_FILES", "30")))
 MAX_TRANSCRIPT_JOBS = max(100, int(os.getenv("MAX_TRANSCRIPT_JOBS", "1000")))
 JOB_RETENTION_SECONDS = max(60, int(os.getenv("JOB_RETENTION_SECONDS", "3600")))
 

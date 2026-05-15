@@ -7,7 +7,7 @@ const API_BASE = process.env.NEXT_PUBLIC_PARSER_API_BASE ?? "http://127.0.0.1:80
 const BATCH_SUBMIT_URL = `${API_BASE}/transcript/batches/submit`;
 const ANALYZE_POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_POLL_INTERVAL_MS ?? "1500");
 const ANALYZE_MAX_WAIT_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_MAX_WAIT_MS ?? "600000");
-const MAX_BATCH_FILES = 10;
+const MAX_BATCH_FILES = Math.max(1, Number(process.env.NEXT_PUBLIC_MAX_BATCH_FILES ?? "30"));
 
 type CourseResult = {
   course_title?: string;
@@ -154,7 +154,7 @@ export default function App() {
     <main className={styles.page}>
       <section className={styles.headerCard}>
         <h1 className={styles.title}>Transcript Parser</h1>
-        <p className={styles.subtitle}>Upload up to 10 transcripts, then expand each one to review all counted attributes.</p>
+        <p className={styles.subtitle}>Upload up to {MAX_BATCH_FILES} transcripts, then expand each one to review all counted attributes.</p>
       </section>
 
       <section className={styles.uploadCard}>
@@ -175,7 +175,7 @@ export default function App() {
             onChange={(e) => void analyzeBatch(e.target.files)}
           />
           <strong>Drop transcripts or click to upload</strong>
-          <span>Up to 10 files per batch</span>
+          <span>Up to {MAX_BATCH_FILES} files per batch</span>
         </div>
 
         {selectedNames.length > 0 && (
