@@ -11,6 +11,7 @@ class TranscriptAIResult(TypedDict):
     courses: list[dict[str, Any]]
     gpa: dict[str, Any]
     notes: list[str]
+    current_school_grade: str | None
 
 
 def _to_float(value: Any) -> float | None:
@@ -204,6 +205,7 @@ def _user_prompt(extracted_text: str, pre_extracted_anchors: dict[str, Any] | No
         '      "grade_points": number_or_null\n'
         "    }\n"
         "  ],\n"
+        '  "current_school_grade": "Grade 9" | "Grade 10" | "Grade 11" | "Grade 12" | "Freshman" | "Sophomore" | "Junior" | "Senior" | "Unknown" | null,\n'
         '  "gpa": {\n'
         '    "reported_weighted": number_or_null,\n'
         '    "unweighted_4_scale": number_or_null,\n'
@@ -215,6 +217,7 @@ def _user_prompt(extracted_text: str, pre_extracted_anchors: dict[str, Any] | No
         "Conventions:\n"
         "- A unit equals 0.5 credits. If credits are present, convert with: units = credits / 0.5.\n"
         "- For each course, include grade and credit when available; keep grade as a normalized value such as A, A-, B+, etc.\n"
+        "- current_school_grade should be the applicant's current high school grade when explicitly present; otherwise use Unknown.\n"
         "- If unweighted GPA is present, use/display only unweighted_4_scale.\n"
         "- If only weighted GPA is present, calculate unweighted_4_scale from the transcript data and explain method in notes.\n"
         "- If data is missing, use null and explain briefly in notes.\n\n"
@@ -263,4 +266,5 @@ def analyze_transcript_with_azure_openai(
         courses=payload.get("courses", []),
         gpa=payload.get("gpa", {}),
         notes=payload.get("notes", []),
+        current_school_grade=payload.get("current_school_grade"),
     )

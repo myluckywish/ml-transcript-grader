@@ -25,6 +25,7 @@ type AnalyzeResponse = {
   courses?: CourseResult[];
   totals_by_category?: Record<string, number | null>;
   unweighted_gpa?: number | null;
+  current_school_grade?: string | null;
   warnings?: string[];
   classification_provider?: {
     error?: string | null;
@@ -227,6 +228,10 @@ export default function App() {
                       <div className={styles.statTile}>
                         <span>Unweighted GPA</span>
                         <strong>{result.unweighted_gpa ?? "N/A"}</strong>
+                      </div>
+                      <div className={styles.statTile}>
+                        <span>School Grade</span>
+                        <strong>{result.current_school_grade ?? "Unknown"}</strong>
                       </div>
                     </div>
 

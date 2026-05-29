@@ -24,6 +24,12 @@ CATEGORIES = {
 QUALIFIER_TOKENS = {"HONORS", "H", "AP", "IB", "ADV", "ADVANCED", "PREAP", "PRE-AP"}
 MIN_EXTRACTED_CHARACTERS = 300
 MAX_ANCHOR_COURSE_LINES = 40
+SCHOOL_GRADE_ALIASES = {
+    "freshman": "Freshman",
+    "sophomore": "Sophomore",
+    "junior": "Junior",
+    "senior": "Senior",
+}
 
 
 def _to_float(value: Any) -> float | None:
@@ -171,6 +177,47 @@ def _extract_pre_anchors(extracted_text: str) -> dict[str, Any]:
     }
 
 
+def _normalize_school_grade(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered == "unknown":
+        return "Unknown"
+
+    alias = SCHOOL_GRADE_ALIASES.get(lowered)
+    if alias:
+        return alias
+
+    match = re.fullmatch(r"(?:grade\s*)?(9|10|11|12)", lowered)
+    if match:
+        return f"Grade {match.group(1)}"
+    return None
+
+
+def _extract_current_school_grade(extracted_text: str) -> str:
+    lowered = extracted_text.lower()
+    for token, normalized in SCHOOL_GRADE_ALIASES.items():
+        if re.search(rf"\b{re.escape(token)}\b", lowered):
+            return normalized
+
+    grade_match = re.search(
+        r"\b(?:current\s+)?(?:grade|gr)\s*[:\-]?\s*(9|10|11|12)\b",
+        lowered,
+        flags=re.IGNORECASE,
+    )
+    if grade_match:
+        return f"Grade {grade_match.group(1)}"
+
+    standalone_match = re.search(r"\bgrade\s*(9|10|11|12)\b", lowered, flags=re.IGNORECASE)
+    if standalone_match:
+        return f"Grade {standalone_match.group(1)}"
+
+    return "Unknown"
+
+
 def analyze_transcript_content(filename: str, content_type: str, data: bytes) -> dict[str, Any]:
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
@@ -246,6 +293,8 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
 
     totals_by_category = {key: round(value, 3) for key, value in totals_by_category.items()}
     gpa = (ai_result or {}).get("gpa", {})
+    ai_school_grade = _normalize_school_grade((ai_result or {}).get("current_school_grade"))
+    school_grade = ai_school_grade or _extract_current_school_grade(extracted_text)
     warnings = _extraction_warnings(extracted_text)
     if ai_error:
         warnings.append("Course classification timed out or failed; totals may be incomplete.")
@@ -257,6 +306,7 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
         "courses": courses if isinstance(courses, list) else [],
         "totals_by_category": totals_by_category,
         "unweighted_gpa": _to_float(gpa.get("unweighted_4_scale")),
+        "current_school_grade": school_grade,
         "warnings": warnings,
         "extraction_provider": {
             "name": "azure_document_intelligence",
