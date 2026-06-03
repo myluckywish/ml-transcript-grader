@@ -273,25 +273,20 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
 
     courses = (ai_result or {}).get("courses", [])
     totals_by_category = {
-        "english": 0.0,
-        "mathematics": 0.0,
-        "natural_sciences": 0.0,
-        "social_sciences": 0.0,
-        "foreign_language": 0.0,
-        "other_units": 0.0,
-        "other": 0.0,
+        "english": 0,
+        "mathematics": 0,
+        "natural_sciences": 0,
+        "social_sciences": 0,
+        "foreign_language": 0,
+        "other_units": 0,
+        "other": 0,
     }
     unit_courses = _dedupe_courses_for_units([c for c in courses if isinstance(c, dict)]) if isinstance(courses, list) else []
     for course in unit_courses:
         if _is_non_counted_grade(course.get("grade")):
             continue
-        units = _course_units(course)
-        if units is None:
-            continue
         subject = _normalized_subject(course.get("subject"))
-        totals_by_category[subject] += units
-
-    totals_by_category = {key: round(value, 3) for key, value in totals_by_category.items()}
+        totals_by_category[subject] += 1
     gpa = (ai_result or {}).get("gpa", {})
     ai_school_grade = _normalize_school_grade((ai_result or {}).get("current_school_grade"))
     school_grade = ai_school_grade or _extract_current_school_grade(extracted_text)

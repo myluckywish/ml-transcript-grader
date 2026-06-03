@@ -89,6 +89,77 @@ function isNonCountedGrade(grade?: string | null): boolean {
   return normalized === "F" || normalized === "U" || normalized === "E";
 }
 
+function toNumber(value?: number | string | null): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function getCourseUnits(course: CourseResult): number {
+  const units = toNumber(course.units);
+  if (units !== null && units > 0) return units;
+  const credit = toNumber(course.credit);
+  if (credit !== null && credit > 0) return credit / 0.5;
+  return 0;
+}
+
+function normalizeCourseTitle(value?: string | null): string {
+  if (!value) return "";
+  return value
+    .toUpperCase()
+    .trim()
+    .replace(/\b(SEMESTER|SEM|S)[\s\-_:]*(1|2)\b/g, " ")
+    .replace(/\b(FALL|SPRING|WINTER|SUMMER)\b/g, " ")
+    .replace(/\b(Q1|Q2|Q3|Q4|TRI1|TRI2|TRI3)\b/g, " ")
+    .replace(/\b(QUARTER|QTR|TRIMESTER|TERM)[\s\-_:]*(1|2|3|4)\b/g, " ")
+    .replace(/\b(PERIOD|PD)\s*\d+\b/g, " ")
+    .replace(/\b\d+(\.\d+)?\s*(CR|CREDIT|CREDITS)\b/g, " ")
+    .replace(/\b(A|B)\b$/g, " ")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildCourseDedupeKey(course: CourseResult): string {
+  const normalizedTitle = normalizeCourseTitle(course.course_title);
+  if (normalizedTitle) return normalizedTitle;
+
+  return `MISSING|${String(course.subject ?? "other").trim().toLowerCase()}|${getCourseUnits(course)}|${String(course.grade ?? "").trim().toUpperCase()}`;
+}
+
+function dedupeCourses(courses: CourseResult[] | undefined): CourseResult[] {
+  const deduped = new Map<string, CourseResult>();
+
+  for (const course of courses ?? []) {
+    const key = buildCourseDedupeKey(course);
+    const existing = deduped.get(key);
+    if (!existing || getCourseUnits(course) > getCourseUnits(existing)) {
+      deduped.set(key, course);
+    }
+  }
+
+  return Array.from(deduped.values());
+}
+
+const CATEGORY_OPTIONS = [
+  "english",
+  "mathematics",
+  "natural_sciences",
+  "social_sciences",
+  "foreign_language",
+  "other_units",
+  "other",
+] as const;
+
+function getCountedCoursesForCategory(courses: CourseResult[] | undefined, category: string): CourseResult[] {
+  return dedupeCourses(courses)
+    .filter((course) => (course.subject ?? "").toLowerCase() === category)
+    .filter((course) => !isNonCountedGrade(course.grade));
+}
+
 export default function App() {
   const [selectedNames, setSelectedNames] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -205,6 +276,11 @@ export default function App() {
         <div className={styles.resultsStack}>
           {(batchStatus?.jobs ?? []).map((job, idx) => {
             const result = job.result ?? null;
+            const categoryCounts = Object.fromEntries(
+              CATEGORY_OPTIONS.map((category) => [category, getCountedCoursesForCategory(result?.courses, category).length]),
+            );
+            const countedCourses = getCountedCoursesForCategory(result?.courses, selectedCategory);
+
             return (
               <details key={`${job.job_id ?? "job"}-${idx}`} className={styles.transcriptItem}>
                 <summary>
@@ -235,9 +311,9 @@ export default function App() {
                       </div>
                     </div>
 
-                    <h3 className={styles.sectionTitle}>Totals by Category</h3>
+                    <h3 className={styles.sectionTitle}>Course Counts by Category</h3>
                     <ul className={styles.unitList}>
-                      {Object.entries(result.totals_by_category ?? {}).map(([subject, value]) => (
+                      {Object.entries(categoryCounts).map(([subject, value]) => (
                         <li key={subject}>
                           <span>{subject}</span>
                           <strong>{value ?? "N/A"}</strong>
@@ -249,20 +325,13 @@ export default function App() {
                     <label className={styles.control}>
                       Category
                       <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
-                        <option value="english">english</option>
-                        <option value="mathematics">mathematics</option>
-                        <option value="natural_sciences">natural_sciences</option>
-                        <option value="social_sciences">social_sciences</option>
-                        <option value="foreign_language">foreign_language</option>
-                        <option value="other_units">other_units</option>
-                        <option value="other">other</option>
+                        {CATEGORY_OPTIONS.map((category) => (
+                          <option key={category} value={category}>{category}</option>
+                        ))}
                       </select>
                     </label>
                     <ul className={styles.unitList}>
-                      {(result.courses ?? [])
-                        .filter((course) => (course.subject ?? "").toLowerCase() === selectedCategory)
-                        .filter((course) => !isNonCountedGrade(course.grade))
-                        .map((course, courseIdx) => (
+                      {countedCourses.map((course, courseIdx) => (
                         <li key={`${course.course_title ?? "course"}-${courseIdx}`}>
                           <span>{course.course_title ?? "Unnamed course"}</span>
                           <strong>{selectedCategory}</strong>
