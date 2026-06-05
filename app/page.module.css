@@ -1,19 +1,19 @@
 .root {
-  --bg: #0c0d12;
-  --surface: #13141a;
-  --surface-raised: #1a1b24;
-  --border: #22242f;
-  --text: #dde1f0;
-  --muted: #565870;
-  --accent: #818cf8;
-  --gpa-high: #34d399;
-  --gpa-mid: #fbbf24;
-  --gpa-low: #f87171;
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --surface-raised: #fafafa;
+  --border: #1a1a1a;
+  --border-light: #e0e0e0;
+  --text: #1a1a1a;
+  --muted: #888888;
+  --gpa-high: #2a6b2a;
+  --gpa-mid: #a05c00;
+  --gpa-low: #c0392b;
 
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-family: "Instrument Sans", system-ui, sans-serif;
+  font-family: "Syne", system-ui, sans-serif;
   padding: 40px 16px 80px;
 }
 
@@ -22,17 +22,14 @@
   margin: 0 auto;
 }
 
-/* Header */
-.header {
-  margin-bottom: 28px;
-}
+.header { margin-bottom: 28px; }
 
 .appTitle {
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--text);
   margin-bottom: 4px;
 }
 
@@ -41,9 +38,8 @@
   color: var(--muted);
 }
 
-/* Upload */
 .dropZone {
-  border: 1px dashed var(--border);
+  border: 1.5px dashed #ccc;
   border-radius: 10px;
   padding: 22px;
   cursor: pointer;
@@ -51,20 +47,18 @@
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  background: var(--surface);
+  background: var(--surface-raised);
   transition: border-color 150ms, background 150ms;
   margin-bottom: 14px;
   text-align: center;
 }
 
 .dropZone:hover {
-  border-color: var(--accent);
-  background: var(--surface-raised);
+  border-color: var(--border);
+  background: #fff;
 }
 
-.hiddenInput {
-  display: none;
-}
+.hiddenInput { display: none; }
 
 .dropLabel {
   font-size: 13px;
@@ -77,14 +71,11 @@
   color: var(--muted);
 }
 
-/* Progress */
-.progressWrap {
-  margin-bottom: 16px;
-}
+.progressWrap { margin-bottom: 16px; }
 
 .progressBar {
   height: 2px;
-  background: var(--border);
+  background: #e0e0e0;
   border-radius: 2px;
   overflow: hidden;
   margin-bottom: 6px;
@@ -92,7 +83,7 @@
 
 .progressFill {
   height: 100%;
-  background: var(--accent);
+  background: var(--text);
   transition: width 400ms ease;
   border-radius: 2px;
 }
@@ -108,8 +99,8 @@
   color: var(--gpa-low);
   margin-bottom: 14px;
   padding: 10px 14px;
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid rgba(248, 113, 113, 0.2);
+  background: #fff5f5;
+  border: 1.5px solid var(--gpa-low);
   border-radius: 8px;
 }
 
@@ -120,19 +111,18 @@
   padding: 48px 0;
 }
 
-/* Results */
 .results {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
-/* Card */
 .card {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
   overflow: hidden;
+  box-shadow: 3px 3px 0 var(--border);
 }
 
 .cardHeader {
@@ -141,12 +131,13 @@
   justify-content: space-between;
   gap: 12px;
   padding: 11px 16px;
-  border-bottom: 1px solid var(--border);
+  background: var(--border);
 }
 
 .filename {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
+  color: #ffffff;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -155,28 +146,17 @@
 
 .badge {
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  padding: 3px 8px;
+  padding: 3px 9px;
   border-radius: 20px;
   flex-shrink: 0;
 }
 
-.badgeOk {
-  background: rgba(52, 211, 153, 0.1);
-  color: #34d399;
-}
-
-.badgeFail {
-  background: rgba(248, 113, 113, 0.1);
-  color: #f87171;
-}
-
-.badgePending {
-  background: rgba(251, 191, 36, 0.1);
-  color: #fbbf24;
-}
+.badgeOk     { background: #d4f5d4; color: #1a4d1a; }
+.badgeFail   { background: #fdd;    color: #8b1a1a; }
+.badgePending{ background: #fef9c3; color: #7a5c00; }
 
 .inlineError {
   font-size: 12px;
@@ -184,11 +164,10 @@
   padding: 8px 16px;
 }
 
-/* Hero row — GPA + Grade */
 .heroRow {
   display: grid;
-  grid-template-columns: 1fr 1px 1fr;
-  border-bottom: 1px solid var(--border);
+  grid-template-columns: 1fr 1.5px 1fr;
+  border-bottom: 1.5px solid var(--border);
 }
 
 .heroStat {
@@ -198,45 +177,35 @@
   gap: 5px;
 }
 
-.divider {
-  background: var(--border);
-}
+.divider { background: var(--border); }
 
 .heroLabel {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .heroValue {
-  font-family: "JetBrains Mono", monospace;
+  font-family: "Syne", system-ui, sans-serif;
   font-size: 30px;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1;
   color: var(--text);
 }
 
-.gpaHigh {
-  color: var(--gpa-high);
-}
+.gpaHigh { color: var(--gpa-high); }
+.gpaMid  { color: var(--gpa-mid); }
+.gpaLow  { color: var(--gpa-low); }
 
-.gpaMid {
-  color: var(--gpa-mid);
-}
-
-.gpaLow {
-  color: var(--gpa-low);
-}
-
-/* Category chips row */
 .categoryRow {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  border-bottom: 1.5px solid var(--border);
 }
 
 .catChip {
@@ -244,14 +213,14 @@
   align-items: center;
   gap: 7px;
   padding: 5px 10px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  background: #fff;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
 }
 
 .catLabel {
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--muted);
 }
 
@@ -262,28 +231,28 @@
   color: var(--text);
 }
 
-/* Details toggle */
 .detailsToggle {
   width: 100%;
   padding: 9px 16px;
-  background: none;
+  background: #fff;
   border: none;
+  border-top: 1.5px solid var(--border);
   color: var(--muted);
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 7px;
-  font-family: "Instrument Sans", system-ui, sans-serif;
-  transition: color 150ms, background 150ms;
+  font-family: "Syne", system-ui, sans-serif;
+  transition: background 150ms, color 150ms;
 }
 
 .detailsToggle:hover {
+  background: var(--bg);
   color: var(--text);
-  background: var(--surface-raised);
 }
 
 .chevron {
@@ -293,15 +262,12 @@
   transition: transform 200ms;
 }
 
-.chevronOpen {
-  transform: rotate(90deg);
-}
+.chevronOpen { transform: rotate(90deg); }
 
-/* Details panel */
 .detailsPanel {
-  border-top: 1px solid var(--border);
+  border-top: 1.5px solid var(--border);
   padding: 14px 16px;
-  background: var(--surface-raised);
+  background: var(--bg);
 }
 
 .warnMsg {
@@ -310,7 +276,6 @@
   margin-bottom: 8px;
 }
 
-/* Category tabs */
 .tabs {
   display: flex;
   flex-wrap: wrap;
@@ -320,29 +285,29 @@
 
 .tab {
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border-radius: 5px;
+  border: 1.5px solid var(--border-light);
+  background: #fff;
   color: var(--muted);
   cursor: pointer;
-  font-family: "Instrument Sans", system-ui, sans-serif;
-  transition: color 120ms, border-color 120ms, background 120ms;
+  font-family: "Syne", system-ui, sans-serif;
+  transition: border-color 120ms, color 120ms, background 120ms;
   display: flex;
   align-items: center;
   gap: 5px;
 }
 
 .tab:hover {
+  border-color: var(--border);
   color: var(--text);
-  border-color: var(--muted);
 }
 
 .tabActive {
-  background: rgba(129, 140, 248, 0.15);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--border);
+  border-color: var(--border);
+  color: #fff;
 }
 
 .tabCount {
@@ -351,7 +316,6 @@
   opacity: 0.8;
 }
 
-/* Course list */
 .courseList {
   list-style: none;
   display: flex;
@@ -364,8 +328,9 @@
   justify-content: space-between;
   align-items: center;
   padding: 7px 10px;
-  background: var(--surface);
-  border-radius: 6px;
+  background: #fff;
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
   font-size: 13px;
   gap: 12px;
 }
@@ -384,7 +349,5 @@
 }
 
 @media (max-width: 480px) {
-  .heroValue {
-    font-size: 22px;
-  }
+  .heroValue { font-size: 22px; }
 }
