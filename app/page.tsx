@@ -118,6 +118,7 @@ function normalizeCourseTitle(value?: string | null): string {
     .replace(/\b(PERIOD|PD)\s*\d+\b/g, " ")
     .replace(/\b\d+(\.\d+)?\s*(CR|CREDIT|CREDITS)\b/g, " ")
     .replace(/\b(A|B)\b$/g, " ")
+    .replace(/(\d)\s*[AB]\b/g, "$1")
     .replace(/[^A-Z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
