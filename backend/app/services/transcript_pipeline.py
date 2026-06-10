@@ -83,6 +83,7 @@ def _normalize_course_title_for_units(value: Any) -> str:
     normalized = re.sub(r"\b(PERIOD|PD)\s*\d+\b", " ", normalized)
     normalized = re.sub(r"\b\d+(\.\d+)?\s*(CR|CREDIT|CREDITS)\b", " ", normalized)
     normalized = re.sub(r"\b(A|B)\b$", " ", normalized)
+    normalized = re.sub(r"(\d)\s*[AB]\b", r"\1", normalized)
     normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
