@@ -27,19 +27,12 @@ type AnalyzeResponse = {
   unweighted_gpa?: number | null;
   current_school_grade?: string | null;
   warnings?: string[];
-  classification_provider?: {
-    error?: string | null;
-  };
+  classification_provider?: { error?: string | null };
 };
 
-type ApiErrorBody = {
-  detail?: unknown;
-};
+type ApiErrorBody = { detail?: unknown };
 
-type BatchSubmitResponse = {
-  batch_id?: string;
-  status?: string;
-};
+type BatchSubmitResponse = { batch_id?: string; status?: string };
 
 type BatchJob = {
   job_id?: string;
@@ -69,31 +62,25 @@ function formatApiError(detail: unknown, fallback: string): string {
   if (!detail) return fallback;
   if (typeof detail === "string") return detail;
   if (typeof detail === "object") {
-    try {
-      return JSON.stringify(detail);
-    } catch {
-      return fallback;
-    }
+    try { return JSON.stringify(detail); } catch { return fallback; }
   }
   return String(detail);
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
 function isNonCountedGrade(grade?: string | null): boolean {
-  const normalized = String(grade ?? "").trim().toUpperCase();
-  return normalized === "F" || normalized === "U" || normalized === "E";
+  const n = String(grade ?? "").trim().toUpperCase();
+  return n === "F" || n === "U" || n === "E";
 }
 
 function toNumber(value?: number | string | null): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const parsed = Number(value.trim());
-    return Number.isFinite(parsed) ? parsed : null;
+    const p = Number(value.trim());
+    return Number.isFinite(p) ? p : null;
   }
   return null;
 }
@@ -125,15 +112,13 @@ function normalizeCourseTitle(value?: string | null): string {
 }
 
 function buildCourseDedupeKey(course: CourseResult): string {
-  const normalizedTitle = normalizeCourseTitle(course.course_title);
-  if (normalizedTitle) return normalizedTitle;
-
+  const t = normalizeCourseTitle(course.course_title);
+  if (t) return t;
   return `MISSING|${String(course.subject ?? "other").trim().toLowerCase()}|${getCourseUnits(course)}|${String(course.grade ?? "").trim().toUpperCase()}`;
 }
 
 function dedupeCourses(courses: CourseResult[] | undefined): CourseResult[] {
   const deduped = new Map<string, CourseResult>();
-
   for (const course of courses ?? []) {
     const key = buildCourseDedupeKey(course);
     const existing = deduped.get(key);
@@ -141,7 +126,6 @@ function dedupeCourses(courses: CourseResult[] | undefined): CourseResult[] {
       deduped.set(key, course);
     }
   }
-
   return Array.from(deduped.values());
 }
 
@@ -155,67 +139,163 @@ const CATEGORY_OPTIONS = [
   "other",
 ] as const;
 
+const CATEGORY_LABELS: Record<string, string> = {
+  english: "English",
+  mathematics: "Math",
+  natural_sciences: "Science",
+  social_sciences: "Social Studies",
+  foreign_language: "Language",
+  other_units: "Other Units",
+  other: "Other",
+};
+
 function getCountedCoursesForCategory(courses: CourseResult[] | undefined, category: string): CourseResult[] {
   return dedupeCourses(courses)
-    .filter((course) => (course.subject ?? "").toLowerCase() === category)
-    .filter((course) => !isNonCountedGrade(course.grade));
+    .filter((c) => (c.subject ?? "").toLowerCase() === category)
+    .filter((c) => !isNonCountedGrade(c.grade));
+}
+
+function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
+  const [open, setOpen] = useState(false);
+  const [activeCategory, setActiveCategory] = useState<string>(CATEGORY_OPTIONS[0]);
+
+  const result = job.result ?? null;
+  const categoryCounts = Object.fromEntries(
+    CATEGORY_OPTIONS.map((cat) => [cat, getCountedCoursesForCategory(result?.courses, cat).length])
+  );
+  const gpa = result?.unweighted_gpa;
+  const gpaClass =
+    gpa == null ? "" : gpa >= 3.5 ? styles.gpaHigh : gpa >= 2.5 ? styles.gpaMid : styles.gpaLow;
+  const badgeClass =
+    job.status === "succeeded" ? styles.badgeOk :
+    job.status === "failed" ? styles.badgeFail :
+    styles.badgePending;
+  const countedCourses = getCountedCoursesForCategory(result?.courses, activeCategory);
+
+  return (
+    <div className={styles.card}>
+      <div className={styles.cardHeader}>
+        <span className={styles.filename}>{job.filename ?? `Transcript ${idx + 1}`}</span>
+        <span className={`${styles.badge} ${badgeClass}`}>{job.status ?? "pending"}</span>
+      </div>
+
+      {job.error && <p className={styles.inlineError}>{job.error}</p>}
+
+      {result && (
+        <>
+          <div className={styles.heroRow}>
+            <div className={styles.heroStat}>
+              <span className={styles.heroLabel}>Unweighted GPA</span>
+              <span className={`${styles.heroValue} ${gpaClass}`}>
+                {gpa != null ? gpa.toFixed(2) : "N/A"}
+              </span>
+            </div>
+            <div className={styles.divider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroLabel}>Grade Level</span>
+              <span className={styles.heroValue}>{result.current_school_grade ?? "Unknown"}</span>
+            </div>
+          </div>
+
+          <div className={styles.categoryRow}>
+            {CATEGORY_OPTIONS.map((cat) => (
+              <div key={cat} className={styles.catChip}>
+                <span className={styles.catLabel}>{CATEGORY_LABELS[cat]}</span>
+                <span className={styles.catCount}>{categoryCounts[cat]}</span>
+              </div>
+            ))}
+          </div>
+
+          <button className={styles.detailsToggle} onClick={() => setOpen((v) => !v)}>
+            <span className={`${styles.chevron} ${open ? styles.chevronOpen : ""}`}>›</span>
+            {open ? "Hide courses" : "Show courses"}
+          </button>
+
+          {open && (
+            <div className={styles.detailsPanel}>
+              {result.warnings?.map((w, i) => (
+                <p key={i} className={styles.warnMsg}>{w}</p>
+              ))}
+              {result.classification_provider?.error && (
+                <p className={styles.inlineError}>Classification: {result.classification_provider.error}</p>
+              )}
+              <div className={styles.tabs}>
+                {CATEGORY_OPTIONS.map((cat) => (
+                  <button
+                    key={cat}
+                    className={`${styles.tab} ${activeCategory === cat ? styles.tabActive : ""}`}
+                    onClick={() => setActiveCategory(cat)}
+                  >
+                    {CATEGORY_LABELS[cat]}
+                    <span className={styles.tabCount}>{categoryCounts[cat]}</span>
+                  </button>
+                ))}
+              </div>
+              <ul className={styles.courseList}>
+                {countedCourses.length === 0 ? (
+                  <li className={styles.emptyMsg}>No courses in this category</li>
+                ) : (
+                  countedCourses.map((course, i) => (
+                    <li key={i} className={styles.courseItem}>
+                      <span>{course.course_title ?? "Unnamed"}</span>
+                      {course.grade && <span className={styles.courseGrade}>{course.grade}</span>}
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
-  const [selectedNames, setSelectedNames] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<BatchStatusResponse | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState("mathematics");
 
   async function analyzeBatch(fileList?: FileList | null) {
     const files = Array.from(fileList ?? []);
     if (files.length === 0) return;
     if (files.length > MAX_BATCH_FILES) {
-      setError(`You can upload up to ${MAX_BATCH_FILES} files per batch.`);
+      setError(`Maximum ${MAX_BATCH_FILES} files per batch.`);
       return;
     }
 
-    setSelectedNames(files.map((file) => file.name));
     setError(null);
     setBatchStatus(null);
+    setIsAnalyzing(true);
 
     const payload = new FormData();
     files.forEach((file) => payload.append("files", file));
 
-    setIsAnalyzing(true);
     try {
       const submitRes = await fetch(BATCH_SUBMIT_URL, { method: "POST", body: payload });
       const submitData: BatchSubmitResponse | ApiErrorBody = await submitRes.json();
       if (!submitRes.ok) {
-        setError(formatApiError((submitData as ApiErrorBody).detail, "Could not queue transcript batch."));
+        setError(formatApiError((submitData as ApiErrorBody).detail, "Could not queue batch."));
         return;
       }
       const batchId = (submitData as BatchSubmitResponse).batch_id;
-      if (!batchId) {
-        setError("Transcript batch did not return a batch id.");
-        return;
-      }
+      if (!batchId) { setError("No batch ID returned."); return; }
 
       const startedAt = Date.now();
       while (Date.now() - startedAt < ANALYZE_MAX_WAIT_MS) {
         const statusRes = await fetch(`${API_BASE}/transcript/batches/${batchId}`);
         const statusData: BatchStatusResponse | ApiErrorBody = await statusRes.json();
         if (!statusRes.ok) {
-          setError(formatApiError((statusData as ApiErrorBody).detail, "Failed to read transcript batch status."));
+          setError(formatApiError((statusData as ApiErrorBody).detail, "Failed to read batch status."));
           return;
         }
         const batch = statusData as BatchStatusResponse;
         setBatchStatus(batch);
-
-        if (batch.status === "succeeded" || batch.status === "completed_with_errors") {
-          return;
-        }
+        if (batch.status === "succeeded" || batch.status === "completed_with_errors") return;
         await sleep(ANALYZE_POLL_INTERVAL_MS);
       }
-
       setError(`Analysis exceeded ${Math.round(ANALYZE_MAX_WAIT_MS / 1000)} seconds.`);
-    } catch (err: unknown) {
+    } catch (err) {
       console.error(err);
       setError("Could not reach backend. Start FastAPI on port 8000.");
     } finally {
@@ -223,21 +303,20 @@ export default function App() {
     }
   }
 
-  return (
-    <main className={styles.page}>
-      <section className={styles.headerCard}>
-        <h1 className={styles.title}>Transcript Parser</h1>
-        <p className={styles.subtitle}>Upload up to {MAX_BATCH_FILES} transcripts, then expand each one to review all counted attributes.</p>
-      </section>
+  const progress = batchStatus?.progress;
 
-      <section className={styles.uploadCard}>
+  return (
+    <div className={styles.root}>
+      <div className={styles.inner}>
+        <header className={styles.header}>
+          <p className={styles.appTitle}>Transcript Grader</p>
+          <p className={styles.appSub}>Upload transcripts to extract GPA and course counts</p>
+        </header>
+
         <div
           className={styles.dropZone}
           onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            void analyzeBatch(e.dataTransfer.files);
-          }}
+          onDrop={(e) => { e.preventDefault(); void analyzeBatch(e.dataTransfer.files); }}
           onClick={() => document.getElementById("transcript-files")?.click()}
         >
           <input
@@ -247,105 +326,35 @@ export default function App() {
             multiple
             onChange={(e) => void analyzeBatch(e.target.files)}
           />
-          <strong>Drop transcripts or click to upload</strong>
-          <span>Up to {MAX_BATCH_FILES} files per batch</span>
+          <span className={styles.dropLabel}>
+            {isAnalyzing ? "Analyzing..." : "Drop transcripts here or click to upload"}
+          </span>
+          <span className={styles.dropSub}>Up to {MAX_BATCH_FILES} PDFs per batch</span>
         </div>
 
-        {selectedNames.length > 0 && (
-          <p className={styles.meta}>Selected: {selectedNames.length} file(s)</p>
+        {isAnalyzing && progress && (
+          <div className={styles.progressWrap}>
+            <div className={styles.progressBar}>
+              <div className={styles.progressFill} style={{ width: `${progress.percent ?? 0}%` }} />
+            </div>
+            <span className={styles.progressText}>
+              {progress.completed ?? 0} / {progress.total ?? 0} processed
+            </span>
+          </div>
         )}
 
-        {isAnalyzing && (
-          <p className={styles.meta}>
-            Batch status: {batchStatus?.status ?? "queued"} ({batchStatus?.progress?.percent ?? 0}%)
-          </p>
+        {error && <p className={styles.globalError}>{error}</p>}
+
+        {(batchStatus?.jobs?.length ?? 0) > 0 ? (
+          <div className={styles.results}>
+            {(batchStatus?.jobs ?? []).map((job, idx) => (
+              <TranscriptCard key={job.job_id ?? idx} job={job} idx={idx} />
+            ))}
+          </div>
+        ) : !isAnalyzing && (
+          <p className={styles.emptyState}>No transcripts analyzed yet.</p>
         )}
-
-        {batchStatus?.progress && (
-          <p className={styles.meta}>
-            Completed {batchStatus.progress.completed ?? 0}/{batchStatus.progress.total ?? 0} | queued {batchStatus.progress.queued ?? 0} |
-            running {batchStatus.progress.running ?? 0} | succeeded {batchStatus.progress.succeeded ?? 0} | failed {batchStatus.progress.failed ?? 0}
-          </p>
-        )}
-
-        {error && <p className={styles.error}>{error}</p>}
-      </section>
-
-      <section className={styles.card}>
-        <h2>Batch Results</h2>
-        {!batchStatus?.jobs?.length && <p className={styles.meta}>No results yet.</p>}
-        <div className={styles.resultsStack}>
-          {(batchStatus?.jobs ?? []).map((job, idx) => {
-            const result = job.result ?? null;
-            const categoryCounts = Object.fromEntries(
-              CATEGORY_OPTIONS.map((category) => [category, getCountedCoursesForCategory(result?.courses, category).length]),
-            );
-            const countedCourses = getCountedCoursesForCategory(result?.courses, selectedCategory);
-
-            return (
-              <details key={`${job.job_id ?? "job"}-${idx}`} className={styles.transcriptItem}>
-                <summary>
-                  <span>{job.filename ?? result?.filename ?? `Transcript ${idx + 1}`}</span>
-                  <strong>{job.status ?? "unknown"}</strong>
-                </summary>
-
-                {job.error && <p className={styles.error}>Error: {job.error}</p>}
-
-                {result?.warnings?.map((warning, warningIdx) => (
-                  <p key={`${warning}-${warningIdx}`} className={styles.meta}>{warning}</p>
-                ))}
-
-                {result?.classification_provider?.error && (
-                  <p className={styles.error}>Classification issue: {result.classification_provider.error}</p>
-                )}
-
-                {result && (
-                  <>
-                    <div className={styles.statGrid}>
-                      <div className={styles.statTile}>
-                        <span>Unweighted GPA</span>
-                        <strong>{result.unweighted_gpa ?? "N/A"}</strong>
-                      </div>
-                      <div className={styles.statTile}>
-                        <span>School Grade</span>
-                        <strong>{result.current_school_grade ?? "Unknown"}</strong>
-                      </div>
-                    </div>
-
-                    <h3 className={styles.sectionTitle}>Course Counts by Category</h3>
-                    <ul className={styles.unitList}>
-                      {Object.entries(categoryCounts).map(([subject, value]) => (
-                        <li key={subject}>
-                          <span>{subject}</span>
-                          <strong>{value ?? "N/A"}</strong>
-                        </li>
-                      ))}
-                    </ul>
-
-                    <h3 className={styles.sectionTitle}>Counted Courses</h3>
-                    <label className={styles.control}>
-                      Category
-                      <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
-                        {CATEGORY_OPTIONS.map((category) => (
-                          <option key={category} value={category}>{category}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <ul className={styles.unitList}>
-                      {countedCourses.map((course, courseIdx) => (
-                        <li key={`${course.course_title ?? "course"}-${courseIdx}`}>
-                          <span>{course.course_title ?? "Unnamed course"}</span>
-                          <strong>{selectedCategory}</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </details>
-            );
-          })}
-        </div>
-      </section>
-    </main>
+      </div>
+    </div>
   );
 }
