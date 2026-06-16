@@ -128,6 +128,18 @@ function getCourseUnits(course: CourseResult): number {
   return 0;
 }
 
+function getCourseCreditValue(course: CourseResult): number {
+  const credit = toNumber(course.credit);
+  if (credit !== null && credit > 0) return credit;
+  const units = toNumber(course.units);
+  if (units !== null && units > 0) return units * 0.5;
+  return 0;
+}
+
+function formatCredits(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
 function normalizeCourseTitle(value?: string | null): string {
   if (!value) return "";
   return value
@@ -282,6 +294,11 @@ function getCountedCoursesForCategory(courses: CourseResult[] | undefined, categ
     .filter((c) => !isNonCountedGrade(c.grade));
 }
 
+function getCountedCreditsForCategory(courses: CourseResult[] | undefined, category: string): number {
+  return getCountedCoursesForCategory(courses, category)
+    .reduce((sum, course) => sum + getCourseCreditValue(course), 0);
+}
+
 function getAllCoursesForCategory(courses: CourseResult[] | undefined, category: string): CourseResult[] {
   return (courses ?? [])
     .filter((c) => (c.subject ?? "").toLowerCase() === category)
@@ -295,6 +312,12 @@ function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
   const result = job.result ?? null;
   const categoryCounts = Object.fromEntries(
     CATEGORY_OPTIONS.map((cat) => [cat, getCountedCoursesForCategory(result?.courses, cat).length])
+  );
+  const categoryCredits = Object.fromEntries(
+    CATEGORY_OPTIONS.map((cat) => [
+      cat,
+      toNumber(result?.credits_by_category?.[cat]) ?? getCountedCreditsForCategory(result?.courses, cat),
+    ])
   );
   const gpa = result?.unweighted_gpa;
   const gpaClass =
@@ -334,7 +357,7 @@ function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
             {CATEGORY_OPTIONS.map((cat) => (
               <div key={cat} className={styles.catChip}>
                 <span className={styles.catLabel}>{CATEGORY_LABELS[cat]}</span>
-                <span className={styles.catCount}>{categoryCounts[cat]}</span>
+                <span className={styles.catCount}>{formatCredits(categoryCredits[cat])}</span>
               </div>
             ))}
           </div>
