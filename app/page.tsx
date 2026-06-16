@@ -8,6 +8,40 @@ const BATCH_SUBMIT_URL = `${API_BASE}/transcript/batches/submit`;
 const ANALYZE_POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_POLL_INTERVAL_MS ?? "1500");
 const ANALYZE_MAX_WAIT_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_MAX_WAIT_MS ?? "600000");
 const MAX_BATCH_FILES = Math.max(1, Number(process.env.NEXT_PUBLIC_MAX_BATCH_FILES ?? "30"));
+const RIGOR_TOKEN_MAP: Record<string, string> = {
+  H: "HONORS",
+  HONORS: "HONORS",
+  AP: "AP",
+  IB: "IB",
+  ADV: "ADVANCED",
+  ADVANCED: "ADVANCED",
+  PREAP: "PREAP",
+  "PRE-AP": "PREAP",
+};
+const TITLE_ABBREVIATIONS: Record<string, string> = {
+  ENG: "ENGLISH",
+  ALG: "ALGEBRA",
+  BIO: "BIOLOGY",
+  CHEM: "CHEMISTRY",
+  PHYS: "PHYSICS",
+  GEO: "GEOMETRY",
+  HIST: "HISTORY",
+  GOV: "GOVERNMENT",
+};
+const ROMAN_NUMERAL_MAP: Record<string, string> = {
+  I: "1",
+  II: "2",
+  III: "3",
+  IV: "4",
+  V: "5",
+  VI: "6",
+  VII: "7",
+  VIII: "8",
+  IX: "9",
+  X: "10",
+};
+const COURSE_CODE_RE = /^[A-Z]{1,4}\d{2,4}[A-Z]?$/;
+const FUZZY_DEDUPE_THRESHOLD = 0.85;
 
 type CourseResult = {
   course_title?: string;
@@ -24,6 +58,7 @@ type AnalyzeResponse = {
   characters?: number;
   courses?: CourseResult[];
   totals_by_category?: Record<string, number | null>;
+  credits_by_category?: Record<string, number | null>;
   unweighted_gpa?: number | null;
   current_school_grade?: string | null;
   warnings?: string[];
@@ -98,6 +133,7 @@ function normalizeCourseTitle(value?: string | null): string {
   return value
     .toUpperCase()
     .trim()
+    .replace(/\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b/g, (match) => ROMAN_NUMERAL_MAP[match] ?? match)
     .replace(/\b(SEMESTER|SEM|S)[\s\-_:]*(1|2)\b/g, " ")
     .replace(/\b(FALL|SPRING|WINTER|SUMMER)\b/g, " ")
     .replace(/\b(Q1|Q2|Q3|Q4|TRI1|TRI2|TRI3)\b/g, " ")
@@ -111,17 +147,108 @@ function normalizeCourseTitle(value?: string | null): string {
     .trim();
 }
 
+function canonicalizeIdentityTokens(normalizedTitle: string): [string, string, string] {
+  if (!normalizedTitle) return ["", "", ""];
+
+  const rigorTokens: string[] = [];
+  const baseTokens: string[] = [];
+  const levelTokens: string[] = [];
+
+  for (const token of normalizedTitle.split(" ")) {
+    const mappedRigor = RIGOR_TOKEN_MAP[token];
+    if (mappedRigor) {
+      rigorTokens.push(mappedRigor);
+      continue;
+    }
+
+    const expanded = TITLE_ABBREVIATIONS[token] ?? token;
+    if (COURSE_CODE_RE.test(expanded)) {
+      continue;
+    }
+    if (/^\d+$/.test(expanded)) {
+      levelTokens.push(expanded);
+      continue;
+    }
+    baseTokens.push(expanded);
+  }
+
+  const rigorKey = Array.from(new Set(rigorTokens)).sort().join("|");
+  const baseKey = baseTokens.join(" ");
+  const levelKey = levelTokens.join(" ");
+  return [baseKey, levelKey, rigorKey];
+}
+
+function courseIdentity(course: CourseResult): [string, string, string] {
+  return canonicalizeIdentityTokens(normalizeCourseTitle(course.course_title));
+}
+
+function unitsAreCompatible(left: CourseResult, right: CourseResult): boolean {
+  const leftUnits = getCourseUnits(left);
+  const rightUnits = getCourseUnits(right);
+  if (!leftUnits || !rightUnits) return true;
+  return Math.abs(leftUnits - rightUnits) <= 0.51 || Math.max(leftUnits, rightUnits) >= 1.0;
+}
+
+function similarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (!a.length || !b.length) return 0;
+
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp: number[][] = Array.from({ length: rows }, (_, i) =>
+    Array.from({ length: cols }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+
+  for (let i = 1; i < rows; i += 1) {
+    for (let j = 1; j < cols; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  const distance = dp[a.length][b.length];
+  return 1 - distance / Math.max(a.length, b.length);
+}
+
+function shouldFuzzyDedupe(course: CourseResult, candidate: CourseResult): boolean {
+  const [baseKey, levelKey, rigorKey] = courseIdentity(course);
+  const [candidateBase, candidateLevel, candidateRigor] = courseIdentity(candidate);
+  if (!baseKey || !candidateBase) return false;
+  if (levelKey !== candidateLevel || rigorKey !== candidateRigor) return false;
+  if ((course.subject ?? "").toLowerCase() !== (candidate.subject ?? "").toLowerCase()) return false;
+  if (!unitsAreCompatible(course, candidate)) return false;
+  return similarity(baseKey, candidateBase) >= FUZZY_DEDUPE_THRESHOLD;
+}
+
 function buildCourseDedupeKey(course: CourseResult): string {
   const t = normalizeCourseTitle(course.course_title);
-  if (t) return t;
+  if (t) {
+    const [baseKey, levelKey, rigorKey] = canonicalizeIdentityTokens(t);
+    return `${baseKey}||${levelKey}||${rigorKey}`;
+  }
   return `MISSING|${String(course.subject ?? "other").trim().toLowerCase()}|${getCourseUnits(course)}|${String(course.grade ?? "").trim().toUpperCase()}`;
 }
 
 function dedupeCourses(courses: CourseResult[] | undefined): CourseResult[] {
   const deduped = new Map<string, CourseResult>();
   for (const course of courses ?? []) {
-    const key = buildCourseDedupeKey(course);
-    const existing = deduped.get(key);
+    let key = buildCourseDedupeKey(course);
+    let existing = deduped.get(key);
+
+    if (!existing) {
+      for (const [candidateKey, candidate] of deduped.entries()) {
+        if (shouldFuzzyDedupe(course, candidate)) {
+          key = candidateKey;
+          existing = candidate;
+          break;
+        }
+      }
+    }
+
     if (!existing || getCourseUnits(course) > getCourseUnits(existing)) {
       deduped.set(key, course);
     }
@@ -155,6 +282,12 @@ function getCountedCoursesForCategory(courses: CourseResult[] | undefined, categ
     .filter((c) => !isNonCountedGrade(c.grade));
 }
 
+function getAllCoursesForCategory(courses: CourseResult[] | undefined, category: string): CourseResult[] {
+  return (courses ?? [])
+    .filter((c) => (c.subject ?? "").toLowerCase() === category)
+    .filter((c) => !isNonCountedGrade(c.grade));
+}
+
 function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
   const [open, setOpen] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>(CATEGORY_OPTIONS[0]);
@@ -170,7 +303,7 @@ function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
     job.status === "succeeded" ? styles.badgeOk :
     job.status === "failed" ? styles.badgeFail :
     styles.badgePending;
-  const countedCourses = getCountedCoursesForCategory(result?.courses, activeCategory);
+  const visibleCourses = getAllCoursesForCategory(result?.courses, activeCategory);
 
   return (
     <div className={styles.card}>
@@ -232,10 +365,10 @@ function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
                 ))}
               </div>
               <ul className={styles.courseList}>
-                {countedCourses.length === 0 ? (
+                {visibleCourses.length === 0 ? (
                   <li className={styles.emptyMsg}>No courses in this category</li>
                 ) : (
-                  countedCourses.map((course, i) => (
+                  visibleCourses.map((course, i) => (
                     <li key={i} className={styles.courseItem}>
                       <span>{course.course_title ?? "Unnamed"}</span>
                       {course.grade && <span className={styles.courseGrade}>{course.grade}</span>}

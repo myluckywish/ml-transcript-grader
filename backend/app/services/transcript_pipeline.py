@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from fastapi import HTTPException
@@ -22,6 +23,40 @@ CATEGORIES = {
     "other",
 }
 QUALIFIER_TOKENS = {"HONORS", "H", "AP", "IB", "ADV", "ADVANCED", "PREAP", "PRE-AP"}
+RIGOR_TOKEN_MAP = {
+    "H": "HONORS",
+    "HONORS": "HONORS",
+    "AP": "AP",
+    "IB": "IB",
+    "ADV": "ADVANCED",
+    "ADVANCED": "ADVANCED",
+    "PREAP": "PREAP",
+    "PRE-AP": "PREAP",
+}
+TITLE_ABBREVIATIONS = {
+    "ENG": "ENGLISH",
+    "ALG": "ALGEBRA",
+    "BIO": "BIOLOGY",
+    "CHEM": "CHEMISTRY",
+    "PHYS": "PHYSICS",
+    "GEO": "GEOMETRY",
+    "HIST": "HISTORY",
+    "GOV": "GOVERNMENT",
+}
+ROMAN_NUMERAL_MAP = {
+    "I": "1",
+    "II": "2",
+    "III": "3",
+    "IV": "4",
+    "V": "5",
+    "VI": "6",
+    "VII": "7",
+    "VIII": "8",
+    "IX": "9",
+    "X": "10",
+}
+COURSE_CODE_PATTERN = re.compile(r"^[A-Z]{1,4}\d{2,4}[A-Z]?$")
+FUZZY_DEDUPE_THRESHOLD = 0.85
 MIN_EXTRACTED_CHARACTERS = 300
 MAX_ANCHOR_COURSE_LINES = 40
 SCHOOL_GRADE_ALIASES = {
@@ -76,6 +111,11 @@ def _normalize_course_title_for_units(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     normalized = value.upper().strip()
+    normalized = re.sub(
+        r"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b",
+        lambda match: ROMAN_NUMERAL_MAP[match.group(1)],
+        normalized,
+    )
     normalized = re.sub(r"\b(SEMESTER|SEM|S)[\s\-_:]*(1|2)\b", " ", normalized)
     normalized = re.sub(r"\b(FALL|SPRING|WINTER|SUMMER)\b", " ", normalized)
     normalized = re.sub(r"\b(Q1|Q2|Q3|Q4|TRI1|TRI2|TRI3)\b", " ", normalized)
@@ -97,6 +137,98 @@ def _extract_qualifier_key(normalized_title: str) -> str:
     return "|".join(qualifiers)
 
 
+def _extract_term_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.upper()
+    patterns = (
+        (r"\b(SEMESTER|SEM|S)[\s\-_:]*(1|2)\b", "S{}"),
+        (r"\b(Q)(1|2|3|4)\b", "Q{}"),
+        (r"\b(TRI)(1|2|3)\b", "TRI{}"),
+        (r"\b(QUARTER|QTR|TRIMESTER|TERM)[\s\-_:]*(1|2|3|4)\b", "T{}"),
+    )
+    for pattern, template in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return template.format(match.group(2))
+
+    suffix_match = re.search(r"(\d)\s*([AB])\b", normalized)
+    if suffix_match:
+        return suffix_match.group(2)
+    trailing_match = re.search(r"\(([^\)]*?)([AB])\)\s*$", normalized)
+    if trailing_match:
+        return trailing_match.group(2)
+    final_match = re.search(r"\b([AB])\b\s*$", normalized)
+    if final_match:
+        return final_match.group(1)
+    return ""
+
+
+def _canonicalize_identity_tokens(normalized_title: str) -> tuple[str, str, str]:
+    if not normalized_title:
+        return "", "", ""
+
+    tokens = normalized_title.split()
+    rigor_tokens: list[str] = []
+    base_tokens: list[str] = []
+    level_tokens: list[str] = []
+
+    for token in tokens:
+        mapped_rigor = RIGOR_TOKEN_MAP.get(token)
+        if mapped_rigor:
+            rigor_tokens.append(mapped_rigor)
+            continue
+
+        expanded = TITLE_ABBREVIATIONS.get(token, token)
+        if COURSE_CODE_PATTERN.fullmatch(expanded):
+            continue
+        if re.fullmatch(r"\d+", expanded):
+            level_tokens.append(expanded)
+            continue
+        base_tokens.append(expanded)
+
+    rigor_key = "|".join(sorted(set(rigor_tokens)))
+    base_key = " ".join(base_tokens)
+    level_key = " ".join(level_tokens)
+    return base_key, level_key, rigor_key
+
+
+def _course_identity(course: dict[str, Any]) -> tuple[str, str, str]:
+    title = str(course.get("course_title", "")).strip()
+    normalized_title = _normalize_course_title_for_units(title)
+    if not normalized_title:
+        return "", "", ""
+    return _canonicalize_identity_tokens(normalized_title)
+
+
+def _units_are_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_units = _course_units(left)
+    right_units = _course_units(right)
+    if left_units is None or right_units is None:
+        return True
+    return abs(left_units - right_units) <= 0.51 or max(left_units, right_units) >= 1.0
+
+
+def _should_fuzzy_dedupe(
+    course: dict[str, Any],
+    candidate: dict[str, Any],
+    identity: tuple[str, str, str],
+    candidate_identity: tuple[str, str, str],
+) -> bool:
+    base_key, level_key, rigor_key = identity
+    candidate_base, candidate_level, candidate_rigor = candidate_identity
+    if not base_key or not candidate_base:
+        return False
+    if level_key != candidate_level or rigor_key != candidate_rigor:
+        return False
+    if _normalized_subject(course.get("subject")) != _normalized_subject(candidate.get("subject")):
+        return False
+    if not _units_are_compatible(course, candidate):
+        return False
+    similarity = SequenceMatcher(a=base_key, b=candidate_base).ratio()
+    return similarity >= FUZZY_DEDUPE_THRESHOLD
+
+
 def _fallback_key_for_missing_title(course: dict[str, Any]) -> str:
     subject = _normalized_subject(course.get("subject"))
     units = _course_units(course)
@@ -105,28 +237,86 @@ def _fallback_key_for_missing_title(course: dict[str, Any]) -> str:
     return f"MISSING|{subject}|{units_part}|{grade}"
 
 
-def _dedupe_courses_for_units(courses: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deduped: dict[str, dict[str, Any]] = {}
+def _group_courses_for_units(courses: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    identities: dict[str, tuple[str, str, str]] = {}
     for course in courses:
         title = str(course.get("course_title", "")).strip()
         normalized_title = _normalize_course_title_for_units(title)
         if normalized_title:
+            base_key, level_key, rigor_key = _canonicalize_identity_tokens(normalized_title)
             qualifier_key = _extract_qualifier_key(normalized_title)
-            dedupe_key = f"{normalized_title}||{qualifier_key}"
+            dedupe_key = f"{base_key}||{level_key}||{rigor_key or qualifier_key}"
         else:
             dedupe_key = _fallback_key_for_missing_title(course)
 
-        existing = deduped.get(dedupe_key)
-        if existing is None:
-            deduped[dedupe_key] = course
-            continue
+        existing_group = grouped.get(dedupe_key)
+        if existing_group is None:
+            course_identity = _course_identity(course)
+            matched_key = None
+            for existing_key, existing_group in grouped.items():
+                representative = max(existing_group, key=lambda item: _course_units(item) or 0.0)
+                existing_identity = identities.get(existing_key) or _course_identity(representative)
+                if _should_fuzzy_dedupe(course, representative, course_identity, existing_identity):
+                    matched_key = existing_key
+                    break
+            if matched_key is None:
+                grouped[dedupe_key] = [course]
+                identities[dedupe_key] = course_identity
+                continue
+            dedupe_key = matched_key
+            existing_group = grouped.get(dedupe_key)
 
-        existing_units = _course_units(existing) or 0.0
-        candidate_units = _course_units(course) or 0.0
-        if candidate_units > existing_units:
-            deduped[dedupe_key] = course
+        if existing_group is None:
+            grouped[dedupe_key] = [course]
+        else:
+            existing_group.append(course)
+        if dedupe_key not in identities:
+            identities[dedupe_key] = _course_identity(course)
 
-    return [*deduped.values()]
+    return [*grouped.values()]
+
+
+def _dedupe_courses_for_units(courses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    for group in _group_courses_for_units(courses):
+        representative = max(group, key=lambda item: _course_units(item) or 0.0)
+        deduped.append(representative)
+    return deduped
+
+
+def _resolved_credit_for_course_group(course_group: list[dict[str, Any]]) -> float:
+    unique_values: list[float] = []
+    term_credits: dict[str, float] = {}
+    has_year_credit = False
+    for course in course_group:
+        credit = _to_float(course.get("credit"))
+        if credit is None or credit <= 0:
+            units = _to_float(course.get("units"))
+            if units is None or units <= 0:
+                continue
+            credit = units * 0.5
+        if credit >= 1.0:
+            has_year_credit = True
+        rounded_credit = round(credit, 3)
+        term_key = _extract_term_key(course.get("course_title"))
+        if term_key:
+            term_credits[term_key] = max(term_credits.get(term_key, 0.0), rounded_credit)
+        elif rounded_credit not in unique_values:
+            unique_values.append(rounded_credit)
+
+    if term_credits:
+        term_total = round(sum(term_credits.values()), 3)
+        if has_year_credit:
+            return max(term_total, max(unique_values or [0.0]))
+        return round(term_total + sum(unique_values), 3)
+    if not unique_values:
+        return 0.0
+    if has_year_credit:
+        return max(unique_values)
+
+    total = round(sum(unique_values), 3)
+    return total
 
 
 def _extraction_warnings(extracted_text: str) -> list[str]:
@@ -282,12 +472,29 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
         "other_units": 0,
         "other": 0,
     }
-    unit_courses = _dedupe_courses_for_units([c for c in courses if isinstance(c, dict)]) if isinstance(courses, list) else []
+    credits_by_category = {
+        "english": 0.0,
+        "mathematics": 0.0,
+        "natural_sciences": 0.0,
+        "social_sciences": 0.0,
+        "foreign_language": 0.0,
+        "other_units": 0.0,
+        "other": 0.0,
+    }
+    grouped_courses = _group_courses_for_units([c for c in courses if isinstance(c, dict)]) if isinstance(courses, list) else []
+    unit_courses = [max(group, key=lambda item: _course_units(item) or 0.0) for group in grouped_courses]
     for course in unit_courses:
         if _is_non_counted_grade(course.get("grade")):
             continue
         subject = _normalized_subject(course.get("subject"))
         totals_by_category[subject] += 1
+    for course_group in grouped_courses:
+        counted_group = [course for course in course_group if not _is_non_counted_grade(course.get("grade"))]
+        if not counted_group:
+            continue
+        representative = max(counted_group, key=lambda item: _course_units(item) or 0.0)
+        subject = _normalized_subject(representative.get("subject"))
+        credits_by_category[subject] += _resolved_credit_for_course_group(counted_group)
     gpa = (ai_result or {}).get("gpa", {})
     ai_school_grade = _normalize_school_grade((ai_result or {}).get("current_school_grade"))
     school_grade = ai_school_grade or _extract_current_school_grade(extracted_text)
@@ -301,6 +508,7 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
         "characters": len(extracted_text),
         "courses": courses if isinstance(courses, list) else [],
         "totals_by_category": totals_by_category,
+        "credits_by_category": {key: round(value, 3) for key, value in credits_by_category.items()},
         "unweighted_gpa": _to_float(gpa.get("unweighted_4_scale")),
         "current_school_grade": school_grade,
         "warnings": warnings,
