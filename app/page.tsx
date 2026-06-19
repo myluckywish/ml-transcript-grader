@@ -93,6 +93,24 @@ type BatchStatusResponse = {
   jobs?: BatchJob[];
 };
 
+async function readResponseBody(res: Response): Promise<unknown> {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const text = await res.text();
+    return text.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function formatApiError(detail: unknown, fallback: string): string {
   if (!detail) return fallback;
   if (typeof detail === "string") return detail;
@@ -429,9 +447,10 @@ export default function App() {
 
     try {
       const submitRes = await fetch(BATCH_SUBMIT_URL, { method: "POST", body: payload });
-      const submitData: BatchSubmitResponse | ApiErrorBody = await submitRes.json();
+      const submitData = await readResponseBody(submitRes) as BatchSubmitResponse | ApiErrorBody | string | null;
       if (!submitRes.ok) {
-        setError(formatApiError((submitData as ApiErrorBody).detail, "Could not queue batch."));
+        const detail = typeof submitData === "object" && submitData !== null ? (submitData as ApiErrorBody).detail : submitData;
+        setError(`Could not queue batch (${submitRes.status}): ${formatApiError(detail, submitRes.statusText || "Request failed.")}`);
         return;
       }
       const batchId = (submitData as BatchSubmitResponse).batch_id;
@@ -440,9 +459,10 @@ export default function App() {
       const startedAt = Date.now();
       while (Date.now() - startedAt < ANALYZE_MAX_WAIT_MS) {
         const statusRes = await fetch(`${API_BASE}/transcript/batches/${batchId}`);
-        const statusData: BatchStatusResponse | ApiErrorBody = await statusRes.json();
+        const statusData = await readResponseBody(statusRes) as BatchStatusResponse | ApiErrorBody | string | null;
         if (!statusRes.ok) {
-          setError(formatApiError((statusData as ApiErrorBody).detail, "Failed to read batch status."));
+          const detail = typeof statusData === "object" && statusData !== null ? (statusData as ApiErrorBody).detail : statusData;
+          setError(`Failed to read batch status (${statusRes.status}): ${formatApiError(detail, statusRes.statusText || "Request failed.")}`);
           return;
         }
         const batch = statusData as BatchStatusResponse;
@@ -453,7 +473,7 @@ export default function App() {
       setError(`Analysis exceeded ${Math.round(ANALYZE_MAX_WAIT_MS / 1000)} seconds.`);
     } catch (err) {
       console.error(err);
-      setError("Could not reach backend. Start FastAPI on port 8000.");
+      setError(`Could not reach backend: ${err instanceof Error ? err.message : "Unknown network error."}`);
     } finally {
       setIsAnalyzing(false);
     }

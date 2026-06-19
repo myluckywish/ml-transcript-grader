@@ -34,7 +34,7 @@ az group create -n $RG -l $LOC
 az appservice plan create -g $RG -n $FRONT_PLAN --is-linux --sku B1
 az appservice plan create -g $RG -n $BACK_PLAN --is-linux --sku B1
 
-az webapp create -g $RG -p $FRONT_PLAN -n $FRONT_APP --runtime "NODE:20-lts"
+az webapp create -g $RG -p $FRONT_PLAN -n $FRONT_APP --runtime "NODE:24-lts"
 az webapp create -g $RG -p $BACK_PLAN -n $BACK_APP --runtime "PYTHON:3.11"
 ```
 

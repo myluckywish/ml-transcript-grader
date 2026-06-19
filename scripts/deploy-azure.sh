@@ -20,20 +20,30 @@ EOF
 }
 
 deploy_frontend() {
+  local api_base
   local zip_path
-  zip_path="$(mktemp /tmp/screening-frontend-XXXXXX.zip)"
-  trap 'rm -f "$zip_path"' RETURN
+  local stage_dir
+  api_base="${NEXT_PUBLIC_PARSER_API_BASE:-https://${BACK_APP}.azurewebsites.net}"
+  zip_path="/tmp/screening-frontend-$(date +%s)-$$.zip"
+  stage_dir="/tmp/screening-frontend-stage-$(date +%s)-$$"
+  rm -f "$zip_path"
+  rm -rf "$stage_dir"
+  trap 'rm -f "$zip_path"; rm -rf "$stage_dir"' RETURN
+
+  echo "Building frontend with NEXT_PUBLIC_PARSER_API_BASE=$api_base"
+  NEXT_PUBLIC_PARSER_API_BASE="$api_base" npm run build
+
+  echo "Staging standalone frontend into $stage_dir"
+  mkdir -p "$stage_dir/.next"
+  cp -R .next/standalone/. "$stage_dir/"
+  cp -R .next/static "$stage_dir/.next/static"
+  rm -f "$stage_dir/.env"
 
   echo "Packaging frontend into $zip_path"
-  zip -rq "$zip_path" . \
-    -x ".git/*" \
-       "node_modules/*" \
-       ".next/*" \
-       "frontend.zip" \
-       "backend.zip" \
-       "backend/.venv/*" \
-       "backend/__pycache__/*" \
-       "backend/**/*.pyc"
+  (
+    cd "$stage_dir"
+    zip -rq "$zip_path" .
+  )
 
   echo "Deploying frontend to $FRONT_APP"
   az webapp deploy \
@@ -45,7 +55,8 @@ deploy_frontend() {
 
 deploy_backend() {
   local zip_path
-  zip_path="$(mktemp /tmp/screening-backend-XXXXXX.zip)"
+  zip_path="/tmp/screening-backend-$(date +%s)-$$.zip"
+  rm -f "$zip_path"
   trap 'rm -f "$zip_path"' RETURN
 
   echo "Packaging backend into $zip_path"
