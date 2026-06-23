@@ -13,7 +13,7 @@ router = APIRouter()
 
 
 @router.post("/transcript/analyze")
-async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
+async def analyze_transcript(file: UploadFile = File(...), debug: bool = False) -> dict[str, Any]:
     filename = file.filename or "unknown"
     content_type = file.content_type or "application/octet-stream"
     data = await file.read()
@@ -23,7 +23,7 @@ async def analyze_transcript(file: UploadFile = File(...)) -> dict[str, Any]:
         content_type,
         len(data),
     )
-    return analyze_transcript_content(filename=filename, content_type=content_type, data=data)
+    return analyze_transcript_content(filename=filename, content_type=content_type, data=data, debug=debug)
 
 
 @router.post("/transcript/analyze/submit")

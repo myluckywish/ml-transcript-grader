@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.services.document_intelligence import extract_text_with_azure_document_intelligence
+from app.services.request_debug import RequestTracer
 from app.services.transcript_ai import analyze_transcript_with_azure_openai
 from app.settings import load_azure_document_intelligence_settings, load_azure_openai_settings
 
@@ -286,37 +287,72 @@ def _dedupe_courses_for_units(courses: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _resolved_credit_for_course_group(course_group: list[dict[str, Any]]) -> float:
+    return _resolved_credit_breakdown_for_course_group(course_group)["resolved_credit"]
+
+
+def _resolved_credit_breakdown_for_course_group(course_group: list[dict[str, Any]]) -> dict[str, Any]:
     unique_values: list[float] = []
     term_credits: dict[str, float] = {}
     has_year_credit = False
+    considered_courses: list[dict[str, Any]] = []
+    ignored_courses: list[dict[str, Any]] = []
     for course in course_group:
         credit = _to_float(course.get("credit"))
         if credit is None or credit <= 0:
             units = _to_float(course.get("units"))
             if units is None or units <= 0:
+                ignored_courses.append(
+                    {
+                        "course_title": str(course.get("course_title", "")).strip() or "Unnamed",
+                        "reason": "missing_credit_and_units",
+                    }
+                )
                 continue
             credit = units * 0.5
         if credit >= 1.0:
             has_year_credit = True
         rounded_credit = round(credit, 3)
         term_key = _extract_term_key(course.get("course_title"))
+        considered_courses.append(
+            {
+                "course_title": str(course.get("course_title", "")).strip() or "Unnamed",
+                "credit_used": rounded_credit,
+                "term_key": term_key or None,
+                "grade": course.get("grade"),
+            }
+        )
         if term_key:
             term_credits[term_key] = max(term_credits.get(term_key, 0.0), rounded_credit)
         elif rounded_credit not in unique_values:
             unique_values.append(rounded_credit)
 
+    resolved_credit = 0.0
+    resolution_strategy = "empty_group"
     if term_credits:
         term_total = round(sum(term_credits.values()), 3)
         if has_year_credit:
-            return max(term_total, max(unique_values or [0.0]))
-        return round(term_total + sum(unique_values), 3)
-    if not unique_values:
-        return 0.0
-    if has_year_credit:
-        return max(unique_values)
+            resolved_credit = max(term_total, max(unique_values or [0.0]))
+            resolution_strategy = "term_total_capped_by_full_year"
+        else:
+            resolved_credit = round(term_total + sum(unique_values), 3)
+            resolution_strategy = "term_total_plus_unique_non_term"
+    elif unique_values:
+        if has_year_credit:
+            resolved_credit = max(unique_values)
+            resolution_strategy = "max_full_year_unique_value"
+        else:
+            resolved_credit = round(sum(unique_values), 3)
+            resolution_strategy = "sum_unique_non_term_values"
 
-    total = round(sum(unique_values), 3)
-    return total
+    return {
+        "resolved_credit": round(resolved_credit, 3),
+        "resolution_strategy": resolution_strategy,
+        "has_year_credit": has_year_credit,
+        "term_credits": term_credits,
+        "unique_non_term_credits": unique_values,
+        "considered_courses": considered_courses,
+        "ignored_courses": ignored_courses,
+    }
 
 
 def _extraction_warnings(extracted_text: str) -> list[str]:
@@ -409,17 +445,97 @@ def _extract_current_school_grade(extracted_text: str) -> str:
     return "Unknown"
 
 
-def analyze_transcript_content(filename: str, content_type: str, data: bytes) -> dict[str, Any]:
+def _build_course_debug_rows(courses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, course in enumerate(courses, start=1):
+        title = str(course.get("course_title", "")).strip()
+        raw_subject = course.get("subject")
+        subject_bucket = _normalized_subject(raw_subject)
+        rows.append(
+            {
+                "index": index,
+                "course_title": title or "Unnamed",
+                "normalized_title": _normalize_course_title_for_units(title),
+                "raw_subject": raw_subject,
+                "subject_bucket": subject_bucket,
+                "grade": course.get("grade"),
+                "is_non_counted_grade": _is_non_counted_grade(course.get("grade")),
+                "credit": _to_float(course.get("credit")),
+                "units": _to_float(course.get("units")),
+                "resolved_units": _course_units(course),
+                "term_key": _extract_term_key(title) or None,
+                "dropdown_visible_in_subject": None
+                if _is_non_counted_grade(course.get("grade"))
+                else subject_bucket,
+            }
+        )
+    return rows
+
+
+def _build_group_debug_rows(grouped_courses: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for index, group in enumerate(grouped_courses, start=1):
+        representative = max(group, key=lambda item: _course_units(item) or 0.0)
+        counted_group = [course for course in group if not _is_non_counted_grade(course.get("grade"))]
+        breakdown = _resolved_credit_breakdown_for_course_group(counted_group) if counted_group else None
+        groups.append(
+            {
+                "group_index": index,
+                "representative_title": str(representative.get("course_title", "")).strip() or "Unnamed",
+                "representative_raw_subject": representative.get("subject"),
+                "representative_subject_bucket": _normalized_subject(representative.get("subject")),
+                "normalized_identity": _course_identity(representative),
+                "course_titles": [str(course.get("course_title", "")).strip() or "Unnamed" for course in group],
+                "counted_course_titles": [
+                    str(course.get("course_title", "")).strip() or "Unnamed" for course in counted_group
+                ],
+                "non_counted_course_titles": [
+                    str(course.get("course_title", "")).strip() or "Unnamed"
+                    for course in group
+                    if _is_non_counted_grade(course.get("grade"))
+                ],
+                "resolved_credit": breakdown["resolved_credit"] if breakdown else 0.0,
+                "credit_breakdown": breakdown,
+            }
+        )
+    return groups
+
+
+def _unique_course_credit_key(course: dict[str, Any]) -> str:
+    title = str(course.get("course_title", "")).strip().upper()
+    subject = _normalized_subject(course.get("subject"))
+    grade = str(course.get("grade", "")).strip().upper()
+    return f"{title}|{subject}|{grade}"
+
+
+def analyze_transcript_content(
+    filename: str,
+    content_type: str,
+    data: bytes,
+    debug: bool = False,
+) -> dict[str, Any]:
+    tracer = RequestTracer("transcript_analyze")
+    tracer.step("request_received", filename=filename, content_type=content_type, byte_count=len(data))
     if not data:
+        tracer.step("validation_failed", reason="empty_upload")
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     docintel_settings = load_azure_document_intelligence_settings()
+    tracer.step(
+        "docintel_config_loaded",
+        enabled=docintel_settings.enabled,
+        configured=len(docintel_settings.missing_required) == 0,
+        missing_settings=docintel_settings.missing_required,
+        model_id=docintel_settings.model_id,
+    )
     if not docintel_settings.enabled:
+        tracer.step("analysis_failed", stage="text_extraction", error="docintel_disabled")
         raise HTTPException(
             status_code=422,
             detail="Could not parse file: Azure Document Intelligence is disabled. Set AZURE_DOC_INTEL_ENABLED=true.",
         )
     if docintel_settings.missing_required:
+        tracer.step("analysis_failed", stage="text_extraction", error="docintel_missing_settings")
         raise HTTPException(
             status_code=422,
             detail=(
@@ -434,32 +550,54 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
             content_type=content_type,
             settings=docintel_settings,
         )
+        tracer.step("text_extracted", extracted_characters=len(extracted_text))
     except ValueError as exc:
         message = str(exc)
+        tracer.step("analysis_failed", stage="text_extraction", error=message)
         if message.startswith("Unsupported file type"):
             raise HTTPException(status_code=415, detail=message) from exc
         logger.error("Parse failed for %s: %s", filename, message)
         raise HTTPException(status_code=422, detail=f"Could not parse file: {message}") from exc
     except Exception as exc:
+        tracer.step("analysis_failed", stage="text_extraction", error=str(exc))
         logger.exception("Unexpected parse failure for %s", filename)
         raise HTTPException(status_code=422, detail=f"Could not parse file: {exc}") from exc
 
     if not extracted_text:
+        tracer.step("analysis_failed", stage="text_extraction", error="empty_extracted_text")
         raise HTTPException(status_code=422, detail="No text could be extracted from this document.")
 
     settings = load_azure_openai_settings()
+    tracer.step(
+        "ai_config_loaded",
+        enabled=settings.enabled,
+        configured=len(settings.missing_required) == 0,
+        missing_settings=settings.missing_required,
+    )
     ai_result: dict[str, Any] | None = None
     ai_error: str | None = None
+    anchors = _extract_pre_anchors(extracted_text)
+    tracer.step(
+        "pre_extraction_anchors_built",
+        candidate_course_line_count=len(anchors.get("course_line_candidates", [])),
+        candidate_course_lines_preview=anchors.get("course_line_candidates", [])[:10],
+        gpa_anchor=anchors.get("gpa"),
+    )
     if settings.enabled:
         try:
-            anchors = _extract_pre_anchors(extracted_text)
             ai_result = analyze_transcript_with_azure_openai(
                 extracted_text,
                 settings,
                 pre_extracted_anchors=anchors,
             )
+            tracer.step(
+                "ai_structuring_complete",
+                returned_course_count=len((ai_result or {}).get("courses", [])),
+                returned_grade=(ai_result or {}).get("current_school_grade"),
+            )
         except Exception as exc:
             ai_error = str(exc)
+            tracer.step("analysis_failed", stage="ai_structuring", error=ai_error)
             logger.exception("Transcript AI analysis failed for filename=%s", filename)
 
     courses = (ai_result or {}).get("courses", [])
@@ -482,19 +620,28 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
         "other": 0.0,
     }
     grouped_courses = _group_courses_for_units([c for c in courses if isinstance(c, dict)]) if isinstance(courses, list) else []
+    tracer.step(
+        "course_grouping_complete",
+        raw_course_count=len([c for c in courses if isinstance(c, dict)]) if isinstance(courses, list) else 0,
+        grouped_course_count=len(grouped_courses),
+    )
     unit_courses = [max(group, key=lambda item: _course_units(item) or 0.0) for group in grouped_courses]
     for course in unit_courses:
         if _is_non_counted_grade(course.get("grade")):
             continue
         subject = _normalized_subject(course.get("subject"))
         totals_by_category[subject] += 1
-    for course_group in grouped_courses:
-        counted_group = [course for course in course_group if not _is_non_counted_grade(course.get("grade"))]
-        if not counted_group:
+    seen_credit_keys: set[str] = set()
+    counted_credit_courses = [course for course in courses if isinstance(course, dict)] if isinstance(courses, list) else []
+    for course in counted_credit_courses:
+        if _is_non_counted_grade(course.get("grade")):
             continue
-        representative = max(counted_group, key=lambda item: _course_units(item) or 0.0)
-        subject = _normalized_subject(representative.get("subject"))
-        credits_by_category[subject] += _resolved_credit_for_course_group(counted_group)
+        credit_key = _unique_course_credit_key(course)
+        if credit_key in seen_credit_keys:
+            continue
+        seen_credit_keys.add(credit_key)
+        subject = _normalized_subject(course.get("subject"))
+        credits_by_category[subject] += 0.5
     gpa = (ai_result or {}).get("gpa", {})
     ai_school_grade = _normalize_school_grade((ai_result or {}).get("current_school_grade"))
     school_grade = ai_school_grade or _extract_current_school_grade(extracted_text)
@@ -502,7 +649,13 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
     if ai_error:
         warnings.append("Course classification timed out or failed; totals may be incomplete.")
 
-    return {
+    tracer.step(
+        "category_totals_resolved",
+        totals_by_category=totals_by_category,
+        credits_by_category={key: round(value, 3) for key, value in credits_by_category.items()},
+        warnings=warnings,
+    )
+    response = {
         "filename": filename,
         "mime_type": content_type,
         "characters": len(extracted_text),
@@ -523,3 +676,22 @@ def analyze_transcript_content(filename: str, content_type: str, data: bytes) ->
             "use_pre_extraction": True,
         },
     }
+    tracer.step("response_ready", response_fields=list(response.keys()))
+    if debug:
+        response["debug"] = {
+            **tracer.payload(),
+            "pre_extracted_anchors": anchors,
+            "course_diagnostics": _build_course_debug_rows(
+                [course for course in courses if isinstance(course, dict)] if isinstance(courses, list) else []
+            ),
+            "group_diagnostics": _build_group_debug_rows(grouped_courses),
+            "ai_result_summary": {
+                "course_count": len([course for course in courses if isinstance(course, dict)])
+                if isinstance(courses, list)
+                else 0,
+                "current_school_grade_raw": (ai_result or {}).get("current_school_grade"),
+                "gpa_raw": gpa,
+                "ai_error": ai_error,
+            },
+        }
+    return response

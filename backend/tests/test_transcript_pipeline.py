@@ -3,10 +3,14 @@
 import pytest
 
 from app.services.transcript_pipeline import (
+    _build_course_debug_rows,
+    _build_group_debug_rows,
     _dedupe_courses_for_units,
     _group_courses_for_units,
     _normalize_course_title_for_units,
+    _resolved_credit_breakdown_for_course_group,
     _resolved_credit_for_course_group,
+    _unique_course_credit_key,
 )
 
 
@@ -172,3 +176,62 @@ def test_resolved_credit_sums_distinct_partial_values_in_same_group() -> None:
     grouped = _group_courses_for_units(courses)
     assert len(grouped) == 1
     assert _resolved_credit_for_course_group(grouped[0]) == 0.75
+
+
+def test_resolved_credit_breakdown_reports_resolution_strategy() -> None:
+    courses = [
+        _course("Geometry S1", 1.0),
+        _course("Geometry S2", 1.0),
+    ]
+    grouped = _group_courses_for_units(courses)
+    breakdown = _resolved_credit_breakdown_for_course_group(grouped[0])
+    assert breakdown["resolved_credit"] == 1.0
+    assert breakdown["resolution_strategy"] == "term_total_capped_by_full_year"
+    assert breakdown["term_credits"] == {"S1": 0.5, "S2": 0.5}
+
+
+def test_course_debug_rows_expose_subject_bucket_and_dropdown_visibility() -> None:
+    rows = _build_course_debug_rows(
+        [
+            {"course_title": "Personalized MathP", "subject": "other", "grade": "A", "credit": 0.5},
+            {"course_title": "English 10", "subject": "english", "grade": "F", "credit": 0.5},
+        ]
+    )
+    assert rows[0]["subject_bucket"] == "other"
+    assert rows[0]["dropdown_visible_in_subject"] == "other"
+    assert rows[1]["is_non_counted_grade"] is True
+    assert rows[1]["dropdown_visible_in_subject"] is None
+
+
+def test_group_debug_rows_include_all_titles_and_credit_breakdown() -> None:
+    courses = [
+        {"course_title": "MA211MYP IB MYP AlgebraB", "subject": "mathematics", "grade": "A", "credit": 0.5},
+        {"course_title": "MA221MYP IB MYP AlgebraA", "subject": "mathematics", "grade": "A", "credit": 0.5},
+    ]
+    groups = _build_group_debug_rows(_group_courses_for_units(courses))
+    assert len(groups) == 1
+    assert groups[0]["course_titles"] == [
+        "MA211MYP IB MYP AlgebraB",
+        "MA221MYP IB MYP AlgebraA",
+    ]
+    assert groups[0]["credit_breakdown"]["resolved_credit"] == 0.5
+
+
+def test_unique_course_credit_key_preserves_literal_title_distinction() -> None:
+    left = _unique_course_credit_key(
+        {"course_title": "MA211MYP IB MYP AlgebraB", "subject": "mathematics", "grade": "A"}
+    )
+    right = _unique_course_credit_key(
+        {"course_title": "MA221MYP IB MYP AlgebraA", "subject": "mathematics", "grade": "A"}
+    )
+    assert left != right
+
+
+def test_unique_course_credit_key_dedupes_exact_same_course_row() -> None:
+    left = _unique_course_credit_key(
+        {"course_title": "IB DP Math Applications", "subject": "mathematics", "grade": "A"}
+    )
+    right = _unique_course_credit_key(
+        {"course_title": "IB DP Math Applications", "subject": "mathematics", "grade": "A"}
+    )
+    assert left == right
