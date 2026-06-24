@@ -180,20 +180,95 @@ def _system_prompt() -> str:
     return (
         "You are a high school transcript evaluation assistant. "
         "Return only JSON. No markdown. "
-        "Count coursework by category and calculate unweighted GPA conversion."
+        "Count coursework by category and calculate unweighted GPA conversion. "
+        "Use document structure and layout cues to reconstruct transcript rows before inferring totals."
     )
 
 
-def _user_prompt(extracted_text: str, pre_extracted_anchors: dict[str, Any] | None = None) -> str:
+def _serialize_document_structure(document_structure: dict[str, Any] | None) -> str:
+    if not document_structure:
+        return "null"
+
+    pages = document_structure.get("pages")
+    tables = document_structure.get("tables")
+    compact_pages: list[dict[str, Any]] = []
+    if isinstance(pages, list):
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            lines_payload = page.get("lines")
+            lines: list[str] = []
+            if isinstance(lines_payload, list):
+                lines = [
+                    str(line.get("text")).strip()
+                    for line in lines_payload
+                    if isinstance(line, dict) and str(line.get("text", "")).strip()
+                ]
+            compact_pages.append(
+                {
+                    "page_number": page.get("page_number"),
+                    "lines": lines,
+                }
+            )
+
+    compact_tables: list[dict[str, Any]] = []
+    if isinstance(tables, list):
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            cells_payload = table.get("cells")
+            cells: list[dict[str, Any]] = []
+            if isinstance(cells_payload, list):
+                for cell in cells_payload:
+                    if not isinstance(cell, dict):
+                        continue
+                    text = str(cell.get("text", "")).strip()
+                    if not text:
+                        continue
+                    cells.append(
+                        {
+                            "row_index": cell.get("row_index"),
+                            "column_index": cell.get("column_index"),
+                            "kind": cell.get("kind"),
+                            "text": text,
+                        }
+                    )
+            compact_tables.append(
+                {
+                    "table_index": table.get("table_index"),
+                    "row_count": table.get("row_count"),
+                    "column_count": table.get("column_count"),
+                    "cells": cells,
+                }
+            )
+
+    return json.dumps(
+        {
+            "pages": compact_pages,
+            "tables": compact_tables,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _user_prompt(
+    extracted_text: str,
+    document_structure: dict[str, Any] | None = None,
+    pre_extracted_anchors: dict[str, Any] | None = None,
+) -> str:
     anchors_block = ""
     if pre_extracted_anchors:
         anchors_json = json.dumps(pre_extracted_anchors, ensure_ascii=False)
         anchors_block = (
-            "Pre-extracted anchors from deterministic parsing (prefer these when consistent with transcript):\n"
+            "Pre-extracted anchors from deterministic parsing (use as hints only; do not let them override the document structure):\n"
             f"{anchors_json}\n\n"
         )
+    structure_block = (
+        "Document structure from OCR/layout extraction. Prefer this over flattened text when reconstructing courses:\n"
+        f"{_serialize_document_structure(document_structure)}\n\n"
+    )
     return (
-        "Analyze the transcript text and output JSON with this exact shape:\n"
+        "Analyze the transcript and output JSON with this exact shape:\n"
         "{\n"
         '  "courses": [\n'
         "    {\n"
@@ -216,11 +291,15 @@ def _user_prompt(extracted_text: str, pre_extracted_anchors: dict[str, Any] | No
         "}\n\n"
         "Conventions:\n"
         "- A unit equals 0.5 credits. If credits are present, convert with: units = credits / 0.5.\n"
+        "- Reconstruct courses from document layout first. Transcript rows may be split across multiple consecutive lines or cells.\n"
+        "- Keep semester or term distinctions when they appear, such as S1, S2, S3, A, B, Quarter 1, etc.\n"
+        "- Do not collapse distinct semester rows into one course entry unless the transcript explicitly shows a full-year course as a single row.\n"
         "- For each course, include grade and credit when available; keep grade as a normalized value such as A, A-, B+, etc.\n"
         "- current_school_grade should be the applicant's current high school grade when explicitly present; otherwise use Unknown.\n"
         "- If unweighted GPA is present, use/display only unweighted_4_scale.\n"
         "- If only weighted GPA is present, calculate unweighted_4_scale from the transcript data and explain method in notes.\n"
         "- If data is missing, use null and explain briefly in notes.\n\n"
+        f"{structure_block}"
         f"{anchors_block}"
         f"Transcript text:\n{extracted_text}"
     )
@@ -229,6 +308,7 @@ def _user_prompt(extracted_text: str, pre_extracted_anchors: dict[str, Any] | No
 def analyze_transcript_with_azure_openai(
     extracted_text: str,
     settings: AzureOpenAISettings,
+    document_structure: dict[str, Any] | None = None,
     pre_extracted_anchors: dict[str, Any] | None = None,
 ) -> TranscriptAIResult:
     if not settings.enabled:
@@ -256,7 +336,14 @@ def analyze_transcript_with_azure_openai(
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": _system_prompt()},
-            {"role": "user", "content": _user_prompt(extracted_text, pre_extracted_anchors=pre_extracted_anchors)},
+            {
+                "role": "user",
+                "content": _user_prompt(
+                    extracted_text,
+                    document_structure=document_structure,
+                    pre_extracted_anchors=pre_extracted_anchors,
+                ),
+            },
         ],
     )
 

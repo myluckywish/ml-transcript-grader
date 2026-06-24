@@ -23,10 +23,6 @@ def _request_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
 
 
 def _flatten_content(result_payload: dict[str, Any]) -> str:
-    content = result_payload.get("analyzeResult", {}).get("content")
-    if isinstance(content, str) and content.strip():
-        return content
-
     pages = result_payload.get("analyzeResult", {}).get("pages", [])
     lines: list[str] = []
     for page in pages:
@@ -34,14 +30,87 @@ def _flatten_content(result_payload: dict[str, Any]) -> str:
             text = line.get("content")
             if isinstance(text, str) and text.strip():
                 lines.append(text.strip())
-    return "\n".join(lines)
+    if lines:
+        return "\n".join(lines)
+
+    content = result_payload.get("analyzeResult", {}).get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    return ""
 
 
-def extract_text_with_azure_document_intelligence(
+def _build_structured_content(result_payload: dict[str, Any]) -> dict[str, Any]:
+    analyze_result = result_payload.get("analyzeResult", {})
+    pages_payload = analyze_result.get("pages", [])
+    tables_payload = analyze_result.get("tables", [])
+
+    pages: list[dict[str, Any]] = []
+    for page in pages_payload:
+        page_number = page.get("pageNumber")
+        width = page.get("width")
+        height = page.get("height")
+        unit = page.get("unit")
+        lines: list[dict[str, Any]] = []
+        for line in page.get("lines", []):
+            text = line.get("content")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            lines.append(
+                {
+                    "text": text.strip(),
+                    "polygon": line.get("polygon"),
+                    "spans": line.get("spans"),
+                }
+            )
+        pages.append(
+            {
+                "page_number": page_number,
+                "width": width,
+                "height": height,
+                "unit": unit,
+                "lines": lines,
+            }
+        )
+
+    tables: list[dict[str, Any]] = []
+    for idx, table in enumerate(tables_payload, start=1):
+        cells_payload = table.get("cells", [])
+        cells: list[dict[str, Any]] = []
+        for cell in cells_payload:
+            text = cell.get("content")
+            if not isinstance(text, str):
+                continue
+            cells.append(
+                {
+                    "row_index": cell.get("rowIndex"),
+                    "column_index": cell.get("columnIndex"),
+                    "row_span": cell.get("rowSpan", 1),
+                    "column_span": cell.get("columnSpan", 1),
+                    "kind": cell.get("kind"),
+                    "text": text.strip(),
+                }
+            )
+        tables.append(
+            {
+                "table_index": idx,
+                "row_count": table.get("rowCount"),
+                "column_count": table.get("columnCount"),
+                "cells": cells,
+            }
+        )
+
+    return {
+        "text": _flatten_content(result_payload),
+        "pages": pages,
+        "tables": tables,
+    }
+
+
+def _extract_result_payload(
     data: bytes,
     content_type: str,
     settings: AzureDocumentIntelligenceSettings,
-) -> str:
+) -> dict[str, Any]:
     if not settings.enabled:
         raise ValueError("Azure Document Intelligence is disabled.")
     if settings.missing_required:
@@ -70,7 +139,7 @@ def extract_text_with_azure_document_intelligence(
         immediate_payload = json.loads(immediate_payload_raw)
         extracted = _flatten_content(immediate_payload)
         if extracted.strip():
-            return extracted
+            return immediate_payload if isinstance(immediate_payload, dict) else {}
 
     if not operation_location:
         raise ValueError("Document Intelligence did not return an operation URL.")
@@ -87,10 +156,32 @@ def extract_text_with_azure_document_intelligence(
         if status == "succeeded":
             extracted = _flatten_content(payload)
             if extracted.strip():
-                return extracted
+                return payload
             raise ValueError("Document Intelligence returned no readable text.")
         if status in {"failed", "canceled"}:
             message = payload.get("error", {}).get("message", "analysis failed")
             raise ValueError(f"Document Intelligence analysis failed: {message}")
 
         time.sleep(settings.poll_interval_seconds)
+
+
+def extract_document_with_azure_document_intelligence(
+    data: bytes,
+    content_type: str,
+    settings: AzureDocumentIntelligenceSettings,
+) -> dict[str, Any]:
+    payload = _extract_result_payload(data=data, content_type=content_type, settings=settings)
+    return _build_structured_content(payload)
+
+
+def extract_text_with_azure_document_intelligence(
+    data: bytes,
+    content_type: str,
+    settings: AzureDocumentIntelligenceSettings,
+) -> str:
+    document = extract_document_with_azure_document_intelligence(
+        data=data,
+        content_type=content_type,
+        settings=settings,
+    )
+    return str(document.get("text", "")).strip()

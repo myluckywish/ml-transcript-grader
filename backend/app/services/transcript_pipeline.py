@@ -7,7 +7,9 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.services.document_intelligence import extract_text_with_azure_document_intelligence
+from app.services.course_mapping_store import find_course_mapping
+from app.services.course_taxonomy import guess_subject_from_rules, normalize_course_title
+from app.services.document_intelligence import extract_document_with_azure_document_intelligence
 from app.services.request_debug import RequestTracer
 from app.services.transcript_ai import analyze_transcript_with_azure_openai
 from app.settings import load_azure_document_intelligence_settings, load_azure_openai_settings
@@ -65,6 +67,21 @@ SCHOOL_GRADE_ALIASES = {
     "sophomore": "Sophomore",
     "junior": "Junior",
     "senior": "Senior",
+}
+SUBJECT_SUMMARY_ALIASES = {
+    "ENGLISH": "english",
+    "MATH": "mathematics",
+    "MATHEMATICS": "mathematics",
+    "SCIENCE": "natural_sciences",
+    "SOCIAL STUDIES": "social_sciences",
+    "SOCIAL SCIENCES": "social_sciences",
+    "FOREIGN LANGUAGE": "foreign_language",
+    "OTHER ELECTIVE": "other_units",
+    "OTHER ELECTIVES": "other_units",
+    "FINE ARTS": "other_units",
+    "HEALTH": "other_units",
+    "PHYSICAL EDUCATION": "other_units",
+    "SERVICE/ONLINE/COMM SERV": "other_units",
 }
 
 
@@ -373,6 +390,83 @@ def _extraction_warnings(extracted_text: str) -> list[str]:
     return warnings
 
 
+def _extract_subject_credit_summary(extracted_text: str) -> dict[str, dict[str, float]]:
+    lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+    summary: dict[str, dict[str, float]] = {}
+    subject_aliases = sorted(SUBJECT_SUMMARY_ALIASES.items(), key=lambda item: len(item[0]), reverse=True)
+
+    for idx, line in enumerate(lines):
+        normalized_line = re.sub(r"\s+", " ", line.upper())
+        matched_subject = None
+        for alias, subject in subject_aliases:
+            if re.fullmatch(re.escape(alias), normalized_line):
+                matched_subject = subject
+                break
+        if matched_subject is None:
+            continue
+
+        numeric_tokens: list[float] = []
+        for lookahead in range(idx, min(idx + 4, len(lines))):
+            numeric_tokens.extend(float(token) for token in re.findall(r"\d+(?:\.\d+)?", lines[lookahead]))
+            if len(numeric_tokens) >= 2:
+                break
+        if len(numeric_tokens) < 2:
+            continue
+
+        attempted, earned = numeric_tokens[0], numeric_tokens[1]
+        existing = summary.get(matched_subject)
+        if existing is None or earned >= existing["earned"]:
+            summary[matched_subject] = {
+                "attempted": round(attempted, 3),
+                "earned": round(earned, 3),
+            }
+
+    return summary
+
+
+def _extract_course_line_candidates(extracted_text: str) -> list[str]:
+    lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+    grade_credit_pattern = re.compile(
+        r"\b(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|P|PASS|CR|S)\b.*\b\d+(?:\.\d+)?\b",
+        re.IGNORECASE,
+    )
+    title_hint_pattern = re.compile(r"[A-Z]{2,}\d{2,4}|[A-Z]{3,}", re.IGNORECASE)
+    skip_pattern = re.compile(
+        r"\b(CREDIT SUMMARY|CLASS RANK|GPA SUMMARY|STUDENT INFORMATION|OFFICIAL'?S SIGNATURE|GRADING SCALE)\b",
+        re.IGNORECASE,
+    )
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for idx in range(len(lines)):
+        windows = [
+            lines[idx],
+            " ".join(lines[idx : min(idx + 2, len(lines))]),
+            " ".join(lines[idx : min(idx + 3, len(lines))]),
+        ]
+        for window in windows:
+            compact_window = re.sub(r"\s+", " ", window).strip()
+            if len(compact_window) < 12:
+                continue
+            if compact_window in seen:
+                continue
+            if re.match(r"^(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|P|PASS|CR|S)\b", compact_window, flags=re.IGNORECASE):
+                continue
+            if skip_pattern.search(compact_window):
+                continue
+            if not grade_credit_pattern.search(compact_window):
+                continue
+            if not title_hint_pattern.search(compact_window):
+                continue
+            seen.add(compact_window)
+            candidates.append(compact_window)
+            break
+        if len(candidates) >= MAX_ANCHOR_COURSE_LINES:
+            break
+
+    return candidates
+
+
 def _extract_pre_anchors(extracted_text: str) -> dict[str, Any]:
     compact = re.sub(r"\s+", " ", extracted_text)
     lowered = compact.lower()
@@ -380,27 +474,13 @@ def _extract_pre_anchors(extracted_text: str) -> dict[str, Any]:
     unweighted_match = re.search(r"unweighted[^0-9]{0,24}(\d(?:\.\d{1,3})?)", lowered, flags=re.IGNORECASE)
     weighted_match = re.search(r"weighted[^0-9]{0,24}(\d(?:\.\d{1,3})?)", lowered, flags=re.IGNORECASE)
 
-    course_lines: list[str] = []
-    grade_line_pattern = re.compile(r"\b(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|P|PASS|CR|S)\b", re.IGNORECASE)
-    credit_pattern = re.compile(r"\b\d(?:\.\d{1,2})?\b")
-    for raw_line in extracted_text.splitlines():
-        line = raw_line.strip()
-        if len(line) < 6:
-            continue
-        if not grade_line_pattern.search(line):
-            continue
-        if not credit_pattern.search(line):
-            continue
-        course_lines.append(line)
-        if len(course_lines) >= MAX_ANCHOR_COURSE_LINES:
-            break
-
     return {
         "gpa": {
             "unweighted_4_scale": float(unweighted_match.group(1)) if unweighted_match else None,
             "reported_weighted": float(weighted_match.group(1)) if weighted_match else None,
         },
-        "course_line_candidates": course_lines,
+        "course_line_candidates": _extract_course_line_candidates(extracted_text),
+        "subject_credit_summary": _extract_subject_credit_summary(extracted_text),
     }
 
 
@@ -508,6 +588,162 @@ def _unique_course_credit_key(course: dict[str, Any]) -> str:
     return f"{title}|{subject}|{grade}"
 
 
+def _infer_subject_from_title(title: str) -> str:
+    normalized_title = normalize_course_title(title)
+    if not normalized_title:
+        return "other"
+    mapping = find_course_mapping(normalized_title=normalized_title, school_id="")
+    if mapping is not None:
+        return _normalized_subject(mapping.get("subject"))
+    guessed = guess_subject_from_rules(normalized_title)
+    if guessed:
+        return _normalized_subject(guessed)
+    return "other"
+
+
+def _clean_extracted_course_title(raw_title: str) -> str:
+    title = raw_title.strip()
+    title = re.sub(r"^[A-Z]{1,6}\d{2,6}[A-Z]*\s+", "", title)
+    title = re.sub(r"\bWGPA\b", " ", title)
+    title = re.sub(r"\s+", " ", title).strip(" -:")
+    return title
+
+
+def _parse_course_candidate(candidate: str) -> dict[str, Any] | None:
+    compact = re.sub(r"\s+", " ", candidate).strip()
+    if not compact:
+        return None
+
+    grade_matches = list(
+        re.finditer(r"\b(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|P|PASS|CR|S)\b(?=[^\n]*\d)", compact, flags=re.IGNORECASE)
+    )
+    if not grade_matches:
+        return None
+    grade_match = grade_matches[-1]
+
+    suffix = compact[grade_match.end() :]
+    numbers = re.findall(r"\d+\.\d+", suffix)
+    if not numbers:
+        numbers = re.findall(r"\d+(?:\.\d+)?", suffix)
+    if not numbers:
+        return None
+    credit = None
+    for token in reversed(numbers):
+        value = _to_float(token)
+        if value is None:
+            continue
+        if 0 < value <= 1.5:
+            credit = round(value, 3)
+            break
+    if credit is None:
+        return None
+
+    title_portion = compact[: grade_match.start()].strip()
+    if not title_portion:
+        return None
+    cleaned_title = _clean_extracted_course_title(title_portion)
+    if not cleaned_title:
+        return None
+    term_match = re.search(r"\((S\d|Q\d|T\d|TRI\d)\)", suffix, flags=re.IGNORECASE)
+    if term_match and not re.search(r"\((S\d|Q\d|T\d|TRI\d)\)", cleaned_title, flags=re.IGNORECASE):
+        cleaned_title = f"{cleaned_title} ({term_match.group(1).upper()})"
+
+    grade = grade_match.group(1).upper()
+    if grade == "PASS":
+        grade = "P"
+    subject = _infer_subject_from_title(cleaned_title)
+    units = round(credit / 0.5, 3) if credit is not None else None
+    return {
+        "course_title": cleaned_title,
+        "subject": subject,
+        "units": units,
+        "credit": credit,
+        "grade": grade,
+        "grade_points": None,
+        "source": "deterministic_ocr",
+    }
+
+
+def _extract_structured_courses_from_ocr(extracted_text: str) -> list[dict[str, Any]]:
+    parsed_courses: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+    skip_pattern = re.compile(
+        r"\b(CREDIT SUMMARY|CLASS RANK|GPA SUMMARY|STUDENT INFORMATION|OFFICIAL'?S SIGNATURE|GRADING SCALE|ATTEMPTED EARNED|MARK WEIGHT CREDIT|COURSE)\b",
+        re.IGNORECASE,
+    )
+    grade_line_pattern = re.compile(
+        r"^(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|P|PASS|CR|S)\b.*\b\d+(?:\.\d+)?\b",
+        re.IGNORECASE,
+    )
+    title_buffer: list[str] = []
+
+    for line in lines:
+        if skip_pattern.search(line):
+            title_buffer = []
+            continue
+        if grade_line_pattern.match(line):
+            if not title_buffer:
+                continue
+            candidate = f"{' '.join(title_buffer)} {line}"
+            parsed = _parse_course_candidate(candidate)
+            title_buffer = []
+            if parsed is None:
+                continue
+            dedupe_key = _unique_course_credit_key(parsed)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            parsed_courses.append(parsed)
+            continue
+
+        if re.search(r"\b\d+(?:\.\d+)?\b", line) and not re.search(r"[A-Z]", line, flags=re.IGNORECASE):
+            continue
+        if len(line) < 4:
+            continue
+        title_buffer.append(line)
+        if len(title_buffer) > 3:
+            title_buffer = title_buffer[-3:]
+
+    return parsed_courses
+
+
+def _merge_ai_and_deterministic_courses(
+    ai_courses: list[dict[str, Any]],
+    deterministic_courses: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for course in ai_courses:
+        if not isinstance(course, dict):
+            continue
+        normalized_course = {
+            "course_title": str(course.get("course_title", "")).strip(),
+            "subject": _normalized_subject(course.get("subject")),
+            "units": _to_float(course.get("units")),
+            "credit": _to_float(course.get("credit")),
+            "grade": str(course.get("grade")).strip().upper() if course.get("grade") is not None else None,
+            "grade_points": _to_float(course.get("grade_points")),
+        }
+        if not normalized_course["course_title"]:
+            continue
+        dedupe_key = _unique_course_credit_key(normalized_course)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        merged.append(normalized_course)
+
+    for course in deterministic_courses:
+        dedupe_key = _unique_course_credit_key(course)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        merged.append(course)
+
+    return merged
+
+
 def analyze_transcript_content(
     filename: str,
     content_type: str,
@@ -545,11 +781,12 @@ def analyze_transcript_content(
         )
 
     try:
-        extracted_text = extract_text_with_azure_document_intelligence(
+        extracted_document = extract_document_with_azure_document_intelligence(
             data=data,
             content_type=content_type,
             settings=docintel_settings,
         )
+        extracted_text = str(extracted_document.get("text", ""))
         tracer.step("text_extracted", extracted_characters=len(extracted_text))
     except ValueError as exc:
         message = str(exc)
@@ -577,17 +814,22 @@ def analyze_transcript_content(
     ai_result: dict[str, Any] | None = None
     ai_error: str | None = None
     anchors = _extract_pre_anchors(extracted_text)
+    deterministic_courses = _extract_structured_courses_from_ocr(extracted_text)
     tracer.step(
         "pre_extraction_anchors_built",
         candidate_course_line_count=len(anchors.get("course_line_candidates", [])),
         candidate_course_lines_preview=anchors.get("course_line_candidates", [])[:10],
         gpa_anchor=anchors.get("gpa"),
+        deterministic_course_count=len(deterministic_courses),
+        extracted_page_count=len(extracted_document.get("pages", [])) if isinstance(extracted_document, dict) else 0,
+        extracted_table_count=len(extracted_document.get("tables", [])) if isinstance(extracted_document, dict) else 0,
     )
     if settings.enabled:
         try:
             ai_result = analyze_transcript_with_azure_openai(
                 extracted_text,
                 settings,
+                document_structure=extracted_document,
                 pre_extracted_anchors=anchors,
             )
             tracer.step(
@@ -600,7 +842,11 @@ def analyze_transcript_content(
             tracer.step("analysis_failed", stage="ai_structuring", error=ai_error)
             logger.exception("Transcript AI analysis failed for filename=%s", filename)
 
-    courses = (ai_result or {}).get("courses", [])
+    ai_courses = (ai_result or {}).get("courses", [])
+    courses = _merge_ai_and_deterministic_courses(
+        ai_courses if isinstance(ai_courses, list) else [],
+        deterministic_courses,
+    )
     totals_by_category = {
         "english": 0,
         "mathematics": 0,
@@ -681,18 +927,21 @@ def analyze_transcript_content(
         response["debug"] = {
             **tracer.payload(),
             "extracted_text": extracted_text,
+            "document_structure": extracted_document,
             "pre_extracted_anchors": anchors,
             "course_diagnostics": _build_course_debug_rows(
                 [course for course in courses if isinstance(course, dict)] if isinstance(courses, list) else []
             ),
             "group_diagnostics": _build_group_debug_rows(grouped_courses),
             "ai_result_summary": {
-                "course_count": len([course for course in courses if isinstance(course, dict)])
-                if isinstance(courses, list)
+                "course_count": len([course for course in ai_courses if isinstance(course, dict)])
+                if isinstance(ai_courses, list)
                 else 0,
+                "merged_course_count": len([course for course in courses if isinstance(course, dict)]),
                 "current_school_grade_raw": (ai_result or {}).get("current_school_grade"),
                 "gpa_raw": gpa,
                 "ai_error": ai_error,
             },
+            "deterministic_courses": deterministic_courses,
         }
     return response

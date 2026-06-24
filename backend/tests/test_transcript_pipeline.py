@@ -6,7 +6,10 @@ from app.services.transcript_pipeline import (
     _build_course_debug_rows,
     _build_group_debug_rows,
     _dedupe_courses_for_units,
+    _extract_pre_anchors,
+    _extract_structured_courses_from_ocr,
     _group_courses_for_units,
+    _merge_ai_and_deterministic_courses,
     _normalize_course_title_for_units,
     _resolved_credit_breakdown_for_course_group,
     _resolved_credit_for_course_group,
@@ -235,3 +238,103 @@ def test_unique_course_credit_key_dedupes_exact_same_course_row() -> None:
         {"course_title": "IB DP Math Applications", "subject": "mathematics", "grade": "A"}
     )
     assert left == right
+
+
+def test_extract_pre_anchors_parses_subject_credit_summary_from_ocr() -> None:
+    extracted_text = """
+Credit Summary
+High School Credit
+Attempted Earned
+FOREIGN LANGUAGE
+3.500
+3.500
+HEALTH
+0.500
+0.500
+MATH
+4.500
+4.500
+OTHER ELECTIVE
+6.875
+6.875
+PHYSICAL EDUCATION
+1.000
+1.000
+SCIENCE
+3.500
+3.500
+SOCIAL STUDIES
+4.000
+4.000
+"""
+    anchors = _extract_pre_anchors(extracted_text)
+    assert anchors["subject_credit_summary"]["mathematics"] == {"attempted": 4.5, "earned": 4.5}
+    assert anchors["subject_credit_summary"]["foreign_language"] == {"attempted": 3.5, "earned": 3.5}
+    assert anchors["subject_credit_summary"]["other_units"] == {"attempted": 6.875, "earned": 6.875}
+
+
+def test_extract_pre_anchors_stitches_wrapped_course_rows() -> None:
+    extracted_text = """
+MA211MYP IB MYP ALGEBRA
+A 0.5000 0.5 (S1)
+MA221MYP IB MYP ALGEBRA (S2)
+A 0.5000 0.5
+"""
+    anchors = _extract_pre_anchors(extracted_text)
+    assert anchors["course_line_candidates"] == [
+        "MA211MYP IB MYP ALGEBRA A 0.5000 0.5 (S1)",
+        "MA221MYP IB MYP ALGEBRA (S2) A 0.5000 0.5",
+    ]
+
+
+def test_extract_structured_courses_from_ocr_recovers_math_rows() -> None:
+    extracted_text = """
+MA211MYP IB MYP ALGEBRA
+A 0.5000 0.5 (S1)
+MA221MYP IB MYP ALGEBRA (S2)
+A 0.5000 0.5
+MA501MYP IB MYP ALGEBRA 2
+& TRIG(S1)
+A 0.5000 0.5
+MA511MYP IB MYP ALGEBRA 2
+& TRIG(S2)
+A 0.5000 0.5
+MA842DPWGPA IB DP MATH B
+APPLICATIONS (S1)
+A 0.5000 0.5
+MA843DPWGPA IB DP MATH B
+APPLICATIONS (S2)
+A 0.5000 0.5
+"""
+    courses = _extract_structured_courses_from_ocr(extracted_text)
+    assert [course["course_title"] for course in courses] == [
+        "IB MYP ALGEBRA (S1)",
+        "IB MYP ALGEBRA (S2)",
+        "IB MYP ALGEBRA 2 & TRIG(S1)",
+        "IB MYP ALGEBRA 2 & TRIG(S2)",
+        "IB DP MATH B APPLICATIONS (S1)",
+        "IB DP MATH B APPLICATIONS (S2)",
+    ]
+    assert all(course["subject"] == "mathematics" for course in courses)
+    assert all(course["credit"] == 0.5 for course in courses)
+
+
+def test_merge_ai_and_deterministic_courses_adds_missing_semesters() -> None:
+    ai_courses = [
+        {"course_title": "IB MYP Geometry", "subject": "mathematics", "grade": "A", "credit": 0.5},
+        {"course_title": "IB DP Math Applications", "subject": "mathematics", "grade": "B", "credit": 0.5},
+    ]
+    deterministic_courses = [
+        {"course_title": "IB MYP Geometry", "subject": "mathematics", "grade": "A", "credit": 0.5},
+        {"course_title": "IB MYP Algebra", "subject": "mathematics", "grade": "A", "credit": 0.5},
+        {"course_title": "IB MYP Algebra 2 & Trig", "subject": "mathematics", "grade": "A", "credit": 0.5},
+        {"course_title": "IB DP Math Applications (S3)", "subject": "mathematics", "grade": "A", "credit": 0.5},
+    ]
+    merged = _merge_ai_and_deterministic_courses(ai_courses, deterministic_courses)
+    assert [course["course_title"] for course in merged] == [
+        "IB MYP Geometry",
+        "IB DP Math Applications",
+        "IB MYP Algebra",
+        "IB MYP Algebra 2 & Trig",
+        "IB DP Math Applications (S3)",
+    ]

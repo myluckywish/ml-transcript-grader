@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.services.document_intelligence import extract_text_with_azure_document_intelligence
+from app.services.document_intelligence import extract_document_with_azure_document_intelligence
 from app.services.request_debug import RequestTracer
 from app.settings import load_azure_document_intelligence_settings
 
@@ -49,11 +49,12 @@ async def parse_document(file: UploadFile = File(...), debug: bool = False) -> d
                 f"Missing Azure Document Intelligence settings: {', '.join(docintel_settings.missing_required)}"
             )
 
-        extracted_text = extract_text_with_azure_document_intelligence(
+        extracted_document = extract_document_with_azure_document_intelligence(
             data=data,
             content_type=content_type,
             settings=docintel_settings,
         )
+        extracted_text = str(extracted_document.get("text", ""))
         tracer.step("text_extracted_docintel", extracted_characters=len(extracted_text))
         logger.debug(
             "Parsed document via Azure Document Intelligence filename=%s extracted_chars=%d",
@@ -88,6 +89,7 @@ async def parse_document(file: UploadFile = File(...), debug: bool = False) -> d
             "text": extracted_text,
             "lines": extracted_text.splitlines(),
             "paragraphs": [chunk.strip() for chunk in extracted_text.split("\n\n") if chunk.strip()],
+            "document_structure": extracted_document,
         },
         "extraction_provider": {
             "name": "azure_document_intelligence",
