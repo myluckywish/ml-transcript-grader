@@ -27,22 +27,22 @@ async def analyze_transcript(file: UploadFile = File(...), debug: bool = False) 
 
 
 @router.post("/transcript/analyze/submit")
-async def submit_transcript_analysis(file: UploadFile = File(...)) -> dict[str, Any]:
+async def submit_transcript_analysis(file: UploadFile = File(...), debug: bool = False) -> dict[str, Any]:
     filename = file.filename or "unknown"
     content_type = file.content_type or "application/octet-stream"
     data = await file.read()
-    return submit_single_job(filename=filename, content_type=content_type, data=data)
+    return submit_single_job(filename=filename, content_type=content_type, data=data, debug=debug)
 
 
 @router.post("/transcript/batches/submit")
-async def submit_transcript_batch(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+async def submit_transcript_batch(files: list[UploadFile] = File(...), debug: bool = False) -> dict[str, Any]:
     uploaded_files: list[tuple[str, str, bytes]] = []
     for file in files:
         filename = file.filename or "unknown"
         content_type = file.content_type or "application/octet-stream"
         data = await file.read()
         uploaded_files.append((filename, content_type, data))
-    return submit_batch_jobs(uploaded_files)
+    return submit_batch_jobs(uploaded_files, debug=debug)
 
 
 @router.get("/transcript/jobs/{job_id}")

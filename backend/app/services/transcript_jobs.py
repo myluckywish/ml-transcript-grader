@@ -77,6 +77,7 @@ def _worker_loop() -> None:
                 filename=job["filename"],
                 content_type=job["content_type"],
                 data=job["data"],
+                debug=bool(job.get("debug")),
             )
             _update_job(job_id, status="succeeded", result=result)
         except HTTPException as exc:
@@ -105,7 +106,7 @@ def ensure_workers_started() -> None:
         _workers_started = True
 
 
-def submit_single_job(filename: str, content_type: str, data: bytes) -> dict[str, Any]:
+def submit_single_job(filename: str, content_type: str, data: bytes, debug: bool = False) -> dict[str, Any]:
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
@@ -122,6 +123,7 @@ def submit_single_job(filename: str, content_type: str, data: bytes) -> dict[str
             "updated_at": now,
             "error": None,
             "result": None,
+            "debug": debug,
             "data": data,
         }
         _cleanup_expired_locked(now)
@@ -129,7 +131,7 @@ def submit_single_job(filename: str, content_type: str, data: bytes) -> dict[str
     return {"job_id": job_id, "status": "queued"}
 
 
-def submit_batch_jobs(uploaded_files: list[tuple[str, str, bytes]]) -> dict[str, Any]:
+def submit_batch_jobs(uploaded_files: list[tuple[str, str, bytes]], debug: bool = False) -> dict[str, Any]:
     if not uploaded_files:
         raise HTTPException(status_code=400, detail="No files were provided.")
     if len(uploaded_files) > MAX_BATCH_FILES:
@@ -158,6 +160,7 @@ def submit_batch_jobs(uploaded_files: list[tuple[str, str, bytes]]) -> dict[str,
                 "updated_at": now,
                 "error": None,
                 "result": None,
+                "debug": debug,
                 "data": data,
             }
         _job_queue.put(job_id)

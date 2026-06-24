@@ -4,45 +4,10 @@ import React, { useState } from "react";
 import styles from "./page.module.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_PARSER_API_BASE ?? "http://127.0.0.1:8000";
-const BATCH_SUBMIT_URL = `${API_BASE}/transcript/batches/submit`;
+const BATCH_SUBMIT_URL = `${API_BASE}/transcript/batches/submit?debug=true`;
 const ANALYZE_POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_POLL_INTERVAL_MS ?? "1500");
 const ANALYZE_MAX_WAIT_MS = Number(process.env.NEXT_PUBLIC_ANALYZE_MAX_WAIT_MS ?? "600000");
 const MAX_BATCH_FILES = Math.max(1, Number(process.env.NEXT_PUBLIC_MAX_BATCH_FILES ?? "30"));
-const RIGOR_TOKEN_MAP: Record<string, string> = {
-  H: "HONORS",
-  HONORS: "HONORS",
-  AP: "AP",
-  IB: "IB",
-  ADV: "ADVANCED",
-  ADVANCED: "ADVANCED",
-  PREAP: "PREAP",
-  "PRE-AP": "PREAP",
-};
-const TITLE_ABBREVIATIONS: Record<string, string> = {
-  ENG: "ENGLISH",
-  ALG: "ALGEBRA",
-  BIO: "BIOLOGY",
-  CHEM: "CHEMISTRY",
-  PHYS: "PHYSICS",
-  GEO: "GEOMETRY",
-  HIST: "HISTORY",
-  GOV: "GOVERNMENT",
-};
-const ROMAN_NUMERAL_MAP: Record<string, string> = {
-  I: "1",
-  II: "2",
-  III: "3",
-  IV: "4",
-  V: "5",
-  VI: "6",
-  VII: "7",
-  VIII: "8",
-  IX: "9",
-  X: "10",
-};
-const COURSE_CODE_RE = /^[A-Z]{1,4}\d{2,4}[A-Z]?$/;
-const FUZZY_DEDUPE_THRESHOLD = 0.85;
-
 type CourseResult = {
   course_title?: string;
   subject?: string;
@@ -63,6 +28,28 @@ type AnalyzeResponse = {
   current_school_grade?: string | null;
   warnings?: string[];
   classification_provider?: { error?: string | null };
+  debug?: {
+    extracted_text?: string;
+    pre_extracted_anchors?: {
+      course_line_candidates?: string[];
+    };
+    course_diagnostics?: Array<{
+      course_title?: string;
+      normalized_title?: string;
+      raw_subject?: string;
+      subject_bucket?: string;
+      grade?: string | null;
+      credit?: number | null;
+      units?: number | null;
+      term_key?: string | null;
+    }>;
+    group_diagnostics?: Array<{
+      representative_title?: string;
+      course_titles?: string[];
+      counted_course_titles?: string[];
+      resolved_credit?: number;
+    }>;
+  };
 };
 
 type ApiErrorBody = { detail?: unknown };
@@ -158,134 +145,6 @@ function formatCredits(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
-function normalizeCourseTitle(value?: string | null): string {
-  if (!value) return "";
-  return value
-    .toUpperCase()
-    .trim()
-    .replace(/\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b/g, (match) => ROMAN_NUMERAL_MAP[match] ?? match)
-    .replace(/\b(SEMESTER|SEM|S)[\s\-_:]*(1|2)\b/g, " ")
-    .replace(/\b(FALL|SPRING|WINTER|SUMMER)\b/g, " ")
-    .replace(/\b(Q1|Q2|Q3|Q4|TRI1|TRI2|TRI3)\b/g, " ")
-    .replace(/\b(QUARTER|QTR|TRIMESTER|TERM)[\s\-_:]*(1|2|3|4)\b/g, " ")
-    .replace(/\b(PERIOD|PD)\s*\d+\b/g, " ")
-    .replace(/\b\d+(\.\d+)?\s*(CR|CREDIT|CREDITS)\b/g, " ")
-    .replace(/\b(A|B)\b$/g, " ")
-    .replace(/(\d)\s*[AB]\b/g, "$1")
-    .replace(/[^A-Z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function canonicalizeIdentityTokens(normalizedTitle: string): [string, string, string] {
-  if (!normalizedTitle) return ["", "", ""];
-
-  const rigorTokens: string[] = [];
-  const baseTokens: string[] = [];
-  const levelTokens: string[] = [];
-
-  for (const token of normalizedTitle.split(" ")) {
-    const mappedRigor = RIGOR_TOKEN_MAP[token];
-    if (mappedRigor) {
-      rigorTokens.push(mappedRigor);
-      continue;
-    }
-
-    const expanded = TITLE_ABBREVIATIONS[token] ?? token;
-    if (COURSE_CODE_RE.test(expanded)) {
-      continue;
-    }
-    if (/^\d+$/.test(expanded)) {
-      levelTokens.push(expanded);
-      continue;
-    }
-    baseTokens.push(expanded);
-  }
-
-  const rigorKey = Array.from(new Set(rigorTokens)).sort().join("|");
-  const baseKey = baseTokens.join(" ");
-  const levelKey = levelTokens.join(" ");
-  return [baseKey, levelKey, rigorKey];
-}
-
-function courseIdentity(course: CourseResult): [string, string, string] {
-  return canonicalizeIdentityTokens(normalizeCourseTitle(course.course_title));
-}
-
-function unitsAreCompatible(left: CourseResult, right: CourseResult): boolean {
-  const leftUnits = getCourseUnits(left);
-  const rightUnits = getCourseUnits(right);
-  if (!leftUnits || !rightUnits) return true;
-  return Math.abs(leftUnits - rightUnits) <= 0.51 || Math.max(leftUnits, rightUnits) >= 1.0;
-}
-
-function similarity(a: string, b: string): number {
-  if (a === b) return 1;
-  if (!a.length || !b.length) return 0;
-
-  const rows = a.length + 1;
-  const cols = b.length + 1;
-  const dp: number[][] = Array.from({ length: rows }, (_, i) =>
-    Array.from({ length: cols }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
-  );
-
-  for (let i = 1; i < rows; i += 1) {
-    for (let j = 1; j < cols; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + cost
-      );
-    }
-  }
-
-  const distance = dp[a.length][b.length];
-  return 1 - distance / Math.max(a.length, b.length);
-}
-
-function shouldFuzzyDedupe(course: CourseResult, candidate: CourseResult): boolean {
-  const [baseKey, levelKey, rigorKey] = courseIdentity(course);
-  const [candidateBase, candidateLevel, candidateRigor] = courseIdentity(candidate);
-  if (!baseKey || !candidateBase) return false;
-  if (levelKey !== candidateLevel || rigorKey !== candidateRigor) return false;
-  if ((course.subject ?? "").toLowerCase() !== (candidate.subject ?? "").toLowerCase()) return false;
-  if (!unitsAreCompatible(course, candidate)) return false;
-  return similarity(baseKey, candidateBase) >= FUZZY_DEDUPE_THRESHOLD;
-}
-
-function buildCourseDedupeKey(course: CourseResult): string {
-  const t = normalizeCourseTitle(course.course_title);
-  if (t) {
-    const [baseKey, levelKey, rigorKey] = canonicalizeIdentityTokens(t);
-    return `${baseKey}||${levelKey}||${rigorKey}`;
-  }
-  return `MISSING|${String(course.subject ?? "other").trim().toLowerCase()}|${getCourseUnits(course)}|${String(course.grade ?? "").trim().toUpperCase()}`;
-}
-
-function dedupeCourses(courses: CourseResult[] | undefined): CourseResult[] {
-  const deduped = new Map<string, CourseResult>();
-  for (const course of courses ?? []) {
-    let key = buildCourseDedupeKey(course);
-    let existing = deduped.get(key);
-
-    if (!existing) {
-      for (const [candidateKey, candidate] of deduped.entries()) {
-        if (shouldFuzzyDedupe(course, candidate)) {
-          key = candidateKey;
-          existing = candidate;
-          break;
-        }
-      }
-    }
-
-    if (!existing || getCourseUnits(course) > getCourseUnits(existing)) {
-      deduped.set(key, course);
-    }
-  }
-  return Array.from(deduped.values());
-}
-
 const CATEGORY_OPTIONS = [
   "english",
   "mathematics",
@@ -307,7 +166,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 };
 
 function getCountedCoursesForCategory(courses: CourseResult[] | undefined, category: string): CourseResult[] {
-  return dedupeCourses(courses)
+  return (courses ?? [])
     .filter((c) => (c.subject ?? "").toLowerCase() === category)
     .filter((c) => !isNonCountedGrade(c.grade));
 }
@@ -417,6 +276,47 @@ function TranscriptCard({ job, idx }: { job: BatchJob; idx: number }) {
                   ))
                 )}
               </ul>
+              {result.debug && (
+                <details className={styles.detailsToggle}>
+                  <summary>Debug transcript parsing</summary>
+                  <div className={styles.detailsPanel}>
+                    <p className={styles.warnMsg}>OCR-derived candidate course lines</p>
+                    <ul className={styles.courseList}>
+                      {(result.debug.pre_extracted_anchors?.course_line_candidates ?? []).map((line, i) => (
+                        <li key={`anchor-${i}`} className={styles.courseItem}>
+                          <span>{line}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className={styles.warnMsg}>Final AI parsed courses</p>
+                    <ul className={styles.courseList}>
+                      {(result.debug.course_diagnostics ?? []).map((course, i) => (
+                        <li key={`diag-${i}`} className={styles.courseItem}>
+                          <span>
+                            {course.course_title ?? "Unnamed"} [{course.subject_bucket ?? course.raw_subject ?? "other"}]
+                          </span>
+                          {course.grade && <span className={styles.courseGrade}>{course.grade}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className={styles.warnMsg}>Grouped courses after backend dedupe/counting</p>
+                    <ul className={styles.courseList}>
+                      {(result.debug.group_diagnostics ?? []).map((group, i) => (
+                        <li key={`group-${i}`} className={styles.courseItem}>
+                          <span>
+                            {group.representative_title ?? "Unnamed"} ({formatCredits(group.resolved_credit ?? 0)} cr)
+                          </span>
+                          <span className={styles.courseGrade}>
+                            {(group.course_titles ?? []).join(" | ")}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className={styles.warnMsg}>Raw OCR text</p>
+                    <pre className={styles.emptyMsg}>{result.debug.extracted_text ?? "No OCR text returned."}</pre>
+                  </div>
+                </details>
+              )}
             </div>
           )}
         </>

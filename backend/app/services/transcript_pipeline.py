@@ -680,6 +680,7 @@ def analyze_transcript_content(
     if debug:
         response["debug"] = {
             **tracer.payload(),
+            "extracted_text": extracted_text,
             "pre_extracted_anchors": anchors,
             "course_diagnostics": _build_course_debug_rows(
                 [course for course in courses if isinstance(course, dict)] if isinstance(courses, list) else []
