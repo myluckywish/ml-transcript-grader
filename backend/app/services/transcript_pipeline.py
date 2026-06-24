@@ -83,6 +83,15 @@ SUBJECT_SUMMARY_ALIASES = {
     "PHYSICAL EDUCATION": "other_units",
     "SERVICE/ONLINE/COMM SERV": "other_units",
 }
+COURSE_BLOCK_SKIP_PATTERN = re.compile(
+    r"\b("
+    r"CREDIT SUMMARY|GPA SUMMARY|CLASS RANK|STUDENT INFORMATION|OFFICIAL'?S SIGNATURE|"
+    r"GRADING SCALE|STANDARD TESTS|WISCONSIN CIVICS EXAM|FAFSA REQUIREMENT|"
+    r"ATTEMPTED EARNED|MARK WEIGHT CREDIT|HIGH SCHOOL CREDIT|THIS TRANSCRIPT IS NOT OFFICIAL|"
+    r"RESULT:|DATE:|TOTAL\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _to_float(value: Any) -> float | None:
@@ -525,6 +534,105 @@ def _extract_current_school_grade(extracted_text: str) -> str:
     return "Unknown"
 
 
+def _extract_course_blocks_from_document(document_structure: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(document_structure, dict):
+        return []
+
+    pages = document_structure.get("pages")
+    if not isinstance(pages, list):
+        return []
+
+    year_pattern = re.compile(r"\b20\d{2}\s*-\s*20\d{2}\b")
+    school_pattern = re.compile(r"^#\d{4}\s+.+")
+    grade_header_pattern = re.compile(r"^Grade\s+(09|10|11|12)\b", re.IGNORECASE)
+    grade_line_pattern = re.compile(
+        r"^(A\+|A-|A|B\+|B-|B|C\+|C-|C|D\+|D-|D|F|U|P|PASS|CR|S)\b$",
+        re.IGNORECASE,
+    )
+    credit_line_pattern = re.compile(r"^\d+(?:\.\d+)?(?:\s+\d+(?:\.\d+)?)+$")
+    standalone_term_pattern = re.compile(r"^\(?((?:S|Q|TRI|T)\d)\)?$", re.IGNORECASE)
+    title_start_pattern = re.compile(r"^[A-Z]{1,6}\d{2,6}[A-Z]*\b", re.IGNORECASE)
+
+    blocks: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_number = page.get("page_number")
+        lines_payload = page.get("lines")
+        if not isinstance(lines_payload, list):
+            continue
+
+        current_year = ""
+        current_school = ""
+        current_grade = ""
+        line_buffer: list[str] = []
+
+        def flush_block() -> None:
+            nonlocal line_buffer
+            if not line_buffer:
+                return
+            block_lines = [line for line in line_buffer if line.strip()]
+            line_buffer = []
+            if not block_lines:
+                return
+            if len(block_lines) == 1 and not title_start_pattern.search(block_lines[0]):
+                return
+            blocks.append(
+                {
+                    "block_id": f"B{len(blocks) + 1:04d}",
+                    "page_number": page_number,
+                    "school": current_school or None,
+                    "year": current_year or None,
+                    "grade_level": current_grade or None,
+                    "lines": block_lines,
+                }
+            )
+
+        for line_entry in lines_payload:
+            if not isinstance(line_entry, dict):
+                continue
+            raw_line = str(line_entry.get("text", "")).strip()
+            if not raw_line:
+                flush_block()
+                continue
+
+            if year_pattern.fullmatch(raw_line):
+                flush_block()
+                current_year = raw_line
+                continue
+            if school_pattern.fullmatch(raw_line):
+                flush_block()
+                current_school = raw_line
+                continue
+            if grade_header_pattern.fullmatch(raw_line):
+                flush_block()
+                current_grade = raw_line
+                continue
+            if COURSE_BLOCK_SKIP_PATTERN.search(raw_line):
+                flush_block()
+                continue
+
+            if title_start_pattern.search(raw_line):
+                flush_block()
+                line_buffer = [raw_line]
+                continue
+
+            if not line_buffer:
+                continue
+
+            line_buffer.append(raw_line)
+            if credit_line_pattern.fullmatch(raw_line):
+                continue
+            if grade_line_pattern.fullmatch(raw_line):
+                continue
+            if standalone_term_pattern.fullmatch(raw_line):
+                flush_block()
+
+        flush_block()
+
+    return blocks
+
+
 def _build_course_debug_rows(courses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, course in enumerate(courses, start=1):
@@ -535,6 +643,7 @@ def _build_course_debug_rows(courses: list[dict[str, Any]]) -> list[dict[str, An
             {
                 "index": index,
                 "course_title": title or "Unnamed",
+                "source_block_id": course.get("source_block_id"),
                 "normalized_title": _normalize_course_title_for_units(title),
                 "raw_subject": raw_subject,
                 "subject_bucket": subject_bucket,
@@ -586,6 +695,26 @@ def _unique_course_credit_key(course: dict[str, Any]) -> str:
     subject = _normalized_subject(course.get("subject"))
     grade = str(course.get("grade", "")).strip().upper()
     return f"{title}|{subject}|{grade}"
+
+
+def _course_block_coverage(course_blocks: list[dict[str, Any]], courses: list[dict[str, Any]]) -> dict[str, Any]:
+    candidate_block_ids = [
+        str(block.get("block_id")).strip()
+        for block in course_blocks
+        if isinstance(block, dict) and str(block.get("block_id", "")).strip()
+    ]
+    used_block_ids = {
+        str(course.get("source_block_id")).strip()
+        for course in courses
+        if isinstance(course, dict) and str(course.get("source_block_id", "")).strip()
+    }
+    missing_block_ids = [block_id for block_id in candidate_block_ids if block_id not in used_block_ids]
+    return {
+        "candidate_block_count": len(candidate_block_ids),
+        "used_block_count": len(used_block_ids),
+        "missing_block_count": len(missing_block_ids),
+        "missing_block_ids": missing_block_ids,
+    }
 
 
 def _infer_subject_from_title(title: str) -> str:
@@ -720,6 +849,7 @@ def _merge_ai_and_deterministic_courses(
             continue
         normalized_course = {
             "course_title": str(course.get("course_title", "")).strip(),
+            "source_block_id": str(course.get("source_block_id")).strip() if course.get("source_block_id") is not None else None,
             "subject": _normalized_subject(course.get("subject")),
             "units": _to_float(course.get("units")),
             "credit": _to_float(course.get("credit")),
@@ -814,12 +944,14 @@ def analyze_transcript_content(
     ai_result: dict[str, Any] | None = None
     ai_error: str | None = None
     anchors = _extract_pre_anchors(extracted_text)
+    course_blocks = _extract_course_blocks_from_document(extracted_document)
     deterministic_courses = _extract_structured_courses_from_ocr(extracted_text)
     tracer.step(
         "pre_extraction_anchors_built",
         candidate_course_line_count=len(anchors.get("course_line_candidates", [])),
         candidate_course_lines_preview=anchors.get("course_line_candidates", [])[:10],
         gpa_anchor=anchors.get("gpa"),
+        candidate_course_block_count=len(course_blocks),
         deterministic_course_count=len(deterministic_courses),
         extracted_page_count=len(extracted_document.get("pages", [])) if isinstance(extracted_document, dict) else 0,
         extracted_table_count=len(extracted_document.get("tables", [])) if isinstance(extracted_document, dict) else 0,
@@ -830,6 +962,7 @@ def analyze_transcript_content(
                 extracted_text,
                 settings,
                 document_structure=extracted_document,
+                course_blocks=course_blocks,
                 pre_extracted_anchors=anchors,
             )
             tracer.step(
@@ -847,6 +980,7 @@ def analyze_transcript_content(
         ai_courses if isinstance(ai_courses, list) else [],
         deterministic_courses,
     )
+    block_coverage = _course_block_coverage(course_blocks, ai_courses if isinstance(ai_courses, list) else [])
     totals_by_category = {
         "english": 0,
         "mathematics": 0,
@@ -894,6 +1028,12 @@ def analyze_transcript_content(
     warnings = _extraction_warnings(extracted_text)
     if ai_error:
         warnings.append("Course classification timed out or failed; totals may be incomplete.")
+    elif block_coverage["candidate_block_count"] > 0 and block_coverage["missing_block_count"] > max(
+        3, block_coverage["candidate_block_count"] // 5
+    ):
+        warnings.append(
+            "AI may have skipped multiple candidate course blocks; inspect debug.course_blocks and source_block_id coverage."
+        )
 
     tracer.step(
         "category_totals_resolved",
@@ -928,6 +1068,7 @@ def analyze_transcript_content(
             **tracer.payload(),
             "extracted_text": extracted_text,
             "document_structure": extracted_document,
+            "course_blocks": course_blocks,
             "pre_extracted_anchors": anchors,
             "course_diagnostics": _build_course_debug_rows(
                 [course for course in courses if isinstance(course, dict)] if isinstance(courses, list) else []
@@ -938,6 +1079,7 @@ def analyze_transcript_content(
                 if isinstance(ai_courses, list)
                 else 0,
                 "merged_course_count": len([course for course in courses if isinstance(course, dict)]),
+                "course_block_coverage": block_coverage,
                 "current_school_grade_raw": (ai_result or {}).get("current_school_grade"),
                 "gpa_raw": gpa,
                 "ai_error": ai_error,

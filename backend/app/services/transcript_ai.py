@@ -251,9 +251,39 @@ def _serialize_document_structure(document_structure: dict[str, Any] | None) -> 
     )
 
 
+def _serialize_course_blocks(course_blocks: list[dict[str, Any]] | None) -> str:
+    if not course_blocks:
+        return "[]"
+
+    rendered_blocks: list[str] = []
+    for block in course_blocks:
+        if not isinstance(block, dict):
+            continue
+        lines = block.get("lines")
+        if not isinstance(lines, list) or not lines:
+            continue
+        context_parts: list[str] = []
+        if block.get("block_id"):
+            context_parts.append(f"Block ID: {block['block_id']}")
+        if block.get("school"):
+            context_parts.append(f"School: {block['school']}")
+        if block.get("year"):
+            context_parts.append(f"Year: {block['year']}")
+        if block.get("grade_level"):
+            context_parts.append(f"Grade: {block['grade_level']}")
+        if block.get("page_number") is not None:
+            context_parts.append(f"Page: {block['page_number']}")
+        header = " | ".join(context_parts)
+        body = "\n".join(str(line).strip() for line in lines if str(line).strip())
+        rendered_blocks.append(f"[{header}]\n{body}")
+
+    return "\n\n---\n\n".join(rendered_blocks)
+
+
 def _user_prompt(
     extracted_text: str,
     document_structure: dict[str, Any] | None = None,
+    course_blocks: list[dict[str, Any]] | None = None,
     pre_extracted_anchors: dict[str, Any] | None = None,
 ) -> str:
     anchors_block = ""
@@ -267,12 +297,17 @@ def _user_prompt(
         "Document structure from OCR/layout extraction. Prefer this over flattened text when reconstructing courses:\n"
         f"{_serialize_document_structure(document_structure)}\n\n"
     )
+    course_blocks_block = (
+        "Candidate course blocks grouped from nearby OCR lines. Treat each block as a possible transcript row or wrapped row:\n"
+        f"{_serialize_course_blocks(course_blocks)}\n\n"
+    )
     return (
         "Analyze the transcript and output JSON with this exact shape:\n"
         "{\n"
         '  "courses": [\n'
         "    {\n"
         '      "course_title": string,\n'
+        '      "source_block_id": string_or_null,\n'
         '      "subject": "english" | "mathematics" | "natural_sciences" | "social_sciences" | "foreign_language" | "other_units" | "other",\n'
         '      "units": number_or_null,\n'
         '      "credit": number_or_null,\n'
@@ -291,14 +326,18 @@ def _user_prompt(
         "}\n\n"
         "Conventions:\n"
         "- A unit equals 0.5 credits. If credits are present, convert with: units = credits / 0.5.\n"
+        "- Prefer the candidate course blocks below when identifying course rows.\n"
         "- Reconstruct courses from document layout first. Transcript rows may be split across multiple consecutive lines or cells.\n"
         "- Keep semester or term distinctions when they appear, such as S1, S2, S3, A, B, Quarter 1, etc.\n"
         "- Do not collapse distinct semester rows into one course entry unless the transcript explicitly shows a full-year course as a single row.\n"
+        "- When a course comes from a candidate block, copy that block's ID into source_block_id.\n"
+        "- Aim for exhaustive coverage of course-row blocks. Do not silently skip repeated semester rows.\n"
         "- For each course, include grade and credit when available; keep grade as a normalized value such as A, A-, B+, etc.\n"
         "- current_school_grade should be the applicant's current high school grade when explicitly present; otherwise use Unknown.\n"
         "- If unweighted GPA is present, use/display only unweighted_4_scale.\n"
         "- If only weighted GPA is present, calculate unweighted_4_scale from the transcript data and explain method in notes.\n"
         "- If data is missing, use null and explain briefly in notes.\n\n"
+        f"{course_blocks_block}"
         f"{structure_block}"
         f"{anchors_block}"
         f"Transcript text:\n{extracted_text}"
@@ -309,6 +348,7 @@ def analyze_transcript_with_azure_openai(
     extracted_text: str,
     settings: AzureOpenAISettings,
     document_structure: dict[str, Any] | None = None,
+    course_blocks: list[dict[str, Any]] | None = None,
     pre_extracted_anchors: dict[str, Any] | None = None,
 ) -> TranscriptAIResult:
     if not settings.enabled:
@@ -341,6 +381,7 @@ def analyze_transcript_with_azure_openai(
                 "content": _user_prompt(
                     extracted_text,
                     document_structure=document_structure,
+                    course_blocks=course_blocks,
                     pre_extracted_anchors=pre_extracted_anchors,
                 ),
             },
